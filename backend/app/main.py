@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
@@ -10,6 +11,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.security import LocalSecurityMiddleware
 from app.database.session import init_db
+from app.services.workloads import ClusterNotFoundError
 from app.web import STATIC_DIR, web_router
 from app.websocket import ws_router
 
@@ -48,6 +50,12 @@ app.add_middleware(
 # Added last => outermost: local-only access control runs before routing/CORS,
 # so remote/cross-origin requests are rejected before touching any handler.
 app.add_middleware(LocalSecurityMiddleware)
+
+
+@app.exception_handler(ClusterNotFoundError)
+async def _cluster_not_found(_request, exc: ClusterNotFoundError):
+    """An unknown cluster id is a 404, not a 502 upstream-failure."""
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 
 @app.middleware("http")

@@ -24,6 +24,22 @@ MUTATING: set[str] = {
     "rollout_undo",
 }
 
+# Cluster-scoped kinds have no namespace; everything else requires one for a
+# targeted delete (so the model can't accidentally hit the wrong namespace).
+_CLUSTER_SCOPED: set[str] = {
+    "node", "nodes",
+    "namespace", "namespaces", "ns",
+    "persistentvolume", "persistentvolumes", "pv",
+    "storageclass", "storageclasses", "sc",
+    "clusterrole", "clusterroles",
+    "clusterrolebinding", "clusterrolebindings",
+}
+
+
+def _is_cluster_scoped(kind: str) -> bool:
+    return kind.strip().lower() in _CLUSTER_SCOPED
+
+
 _KINDS_HINT = (
     "pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, "
     "services, ingress, configmaps, secrets, pvc, nodes, namespaces, events, "
@@ -316,7 +332,12 @@ def execute_tool(client: KubernetesClient, name: str, inp: dict) -> str:
         client.delete_pod(inp["name"], inp["namespace"])
         return _clip({"ok": True, "deleted": inp["name"]})
     if name == "delete_resource":
-        client.delete_resource(inp["kind"], inp["name"], inp.get("namespace"))
+        kind, ns = inp["kind"], inp.get("namespace")
+        if not _is_cluster_scoped(kind) and not ns:
+            raise ValueError(
+                f"namespace é obrigatório para excluir um recurso '{kind}'"
+            )
+        client.delete_resource(kind, inp["name"], ns)
         return _clip({"ok": True, "deleted": inp["name"]})
     if name == "trigger_cronjob":
         job = client.trigger_cronjob(inp["name"], inp["namespace"])
@@ -324,4 +345,4 @@ def execute_tool(client: KubernetesClient, name: str, inp: dict) -> str:
     if name == "set_cronjob_suspend":
         client.set_cronjob_suspend(inp["name"], inp["namespace"], bool(inp["suspend"]))
         return _clip({"ok": True, "suspended": inp["suspend"]})
-    return _clip({"error": f"ferramenta desconhecida: {name}"})
+    raise ValueError(f"ferramenta desconhecida: {name}")

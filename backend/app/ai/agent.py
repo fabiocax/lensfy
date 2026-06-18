@@ -22,6 +22,7 @@ logger = get_logger(__name__)
 
 _ANTHROPIC_VERSION = "2023-06-01"
 _MAX_STEPS = 12  # safety cap on tool-use rounds per question
+_MAX_RETRIES = 4  # retries on transient Claude API errors (429/529/5xx/network)
 
 SYSTEM_PROMPT = """\
 Você é o assistente de SRE do Lensfy, especialista em Kubernetes. Ajuda o usuário \
@@ -72,24 +73,49 @@ class AIAgent:
             raise AIError("LENSFY_ANTHROPIC_API_KEY não configurada")
 
     async def _call(self, http: httpx.AsyncClient, messages: list[dict]) -> dict:
-        resp = await http.post(
-            "/v1/messages",
-            json={
-                "model": self.settings.anthropic_model,
-                "max_tokens": 4096,
-                "system": SYSTEM_PROMPT,
-                "tools": TOOLS,
-                "messages": messages,
-            },
-        )
-        if resp.status_code != 200:
-            detail = resp.text
+        payload = {
+            "model": self.settings.anthropic_model,
+            "max_tokens": 4096,
+            "system": SYSTEM_PROMPT,
+            "tools": TOOLS,
+            "messages": messages,
+        }
+        last_err: AIError | None = None
+        for attempt in range(_MAX_RETRIES):
+            delay: float | None = None
             try:
-                detail = resp.json().get("error", {}).get("message", detail)
-            except Exception:  # noqa: BLE001
-                pass
-            raise AIError(f"Claude API {resp.status_code}: {detail}")
-        return resp.json()
+                resp = await http.post("/v1/messages", json=payload)
+            except httpx.HTTPError as exc:  # connect/read timeout, network blip
+                last_err = AIError(f"Falha de rede ao chamar a Claude API: {exc}")
+            else:
+                if resp.status_code == 200:
+                    return resp.json()
+                last_err = AIError(f"Claude API {resp.status_code}: {self._err_detail(resp)}")
+                # 429 (rate limit), 529 (overloaded) and 5xx are transient; the
+                # rest (400/401/403…) are caller errors — fail fast.
+                if not (resp.status_code in (429, 529) or resp.status_code >= 500):
+                    raise last_err
+                delay = self._retry_after(resp)
+            if attempt < _MAX_RETRIES - 1:
+                await anyio.sleep(delay if delay is not None else min(2 ** attempt, 8))
+        raise last_err or AIError("Claude API: falha após múltiplas tentativas")
+
+    @staticmethod
+    def _err_detail(resp: httpx.Response) -> str:
+        try:
+            return resp.json().get("error", {}).get("message", resp.text)
+        except Exception:  # noqa: BLE001
+            return resp.text
+
+    @staticmethod
+    def _retry_after(resp: httpx.Response) -> float | None:
+        raw = resp.headers.get("retry-after")
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
 
     async def run(
         self,
@@ -115,7 +141,6 @@ class AIAgent:
             for _ in range(_MAX_STEPS):
                 data = await self._call(http, messages)
                 blocks = data.get("content", [])
-                messages.append({"role": "assistant", "content": blocks})
 
                 for b in blocks:
                     if b.get("type") == "text" and b.get("text", "").strip():
@@ -123,6 +148,7 @@ class AIAgent:
 
                 tool_uses = [b for b in blocks if b.get("type") == "tool_use"]
                 if not tool_uses:
+                    messages.append({"role": "assistant", "content": blocks})
                     await emit({"type": "done"})
                     return
 
@@ -156,6 +182,12 @@ class AIAgent:
                         results.append(_tool_result(tid, f"erro ao executar: {exc}", True))
                         await emit({"type": "tool_result", "id": tid, "ok": False, "summary": str(exc)})
 
+                # Commit the assistant turn and its tool results together, only
+                # after every tool_use has a matching result. If emit/approve
+                # raised mid-loop (e.g. client disconnect), nothing was appended,
+                # so the conversation never ends with an orphaned tool_use turn
+                # that would 400 the next request.
+                messages.append({"role": "assistant", "content": blocks})
                 messages.append({"role": "user", "content": results})
 
             await emit({"type": "text", "text": "_(limite de passos atingido)_"})

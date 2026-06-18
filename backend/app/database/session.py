@@ -78,4 +78,6 @@ def _ensure_columns() -> None:
             )
             if ctx_ix:
                 conn.execute(text(f'DROP INDEX IF EXISTS "{ctx_ix["name"]}"'))
-                conn.execute(text("CREATE INDEX ix_clusters_context ON clusters(context)"))
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_clusters_context ON clusters(context)")
+                )

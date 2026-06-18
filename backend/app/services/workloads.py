@@ -18,6 +18,15 @@ class WorkloadServiceError(Exception):
     pass
 
 
+class ClusterNotFoundError(Exception):
+    """Requested cluster id isn't in the local registry — maps to HTTP 404.
+
+    Deliberately NOT a subclass of :class:`WorkloadServiceError` so the route
+    handlers that translate service errors into ``502 Bad Gateway`` (an upstream
+    failure) don't swallow it; a global handler turns it into a clean ``404``.
+    """
+
+
 class WorkloadService:
     def __init__(self, db: Session) -> None:
         self.repo = ClusterRepository(db)
@@ -25,7 +34,7 @@ class WorkloadService:
     def _client(self, cluster_id: int) -> KubernetesClient:
         cluster = self.repo.get(cluster_id)
         if cluster is None:
-            raise WorkloadServiceError(f"Cluster {cluster_id} not found")
+            raise ClusterNotFoundError(f"Cluster {cluster_id} não encontrado")
         try:
             return get_client(
                 cluster.context, cluster.kubeconfig_path, cluster.insecure

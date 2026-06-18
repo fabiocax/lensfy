@@ -8,6 +8,7 @@ lifecycle; each handler documents what it should pump once implemented.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import queue
@@ -84,11 +85,15 @@ async def ws_logs(websocket: WebSocket, cluster_id: int, name: str, namespace: s
         def _next():
             return next(stream, _STREAM_END)
 
-        while True:
-            line = await anyio.to_thread.run_sync(_next, abandon_on_cancel=True)
-            if line is _STREAM_END:
-                break
-            await websocket.send_text(line)
+        def _teardown():
+            try:
+                resp.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        await _pump_until_disconnect(
+            websocket, _next, lambda line: websocket.send_text(line), _teardown
+        )
     except WorkloadServiceError as exc:
         await _safe_send_json(websocket, {"error": str(exc)})
     except (WebSocketDisconnect, asyncio.CancelledError):
@@ -109,6 +114,60 @@ async def _safe_send_json(websocket: WebSocket, payload: dict) -> None:
         await websocket.send_json(payload)
     except Exception:  # noqa: BLE001 - socket already gone
         pass
+
+
+async def _await_disconnect(websocket: WebSocket) -> None:
+    """Resolve when the client disconnects.
+
+    Starlette only surfaces a disconnect from ``receive()``, so a *send-only*
+    stream (logs/events/watch/metrics) would otherwise not notice a closed peer
+    until its next send — and while parked in a blocking ``next()`` between
+    events, that send may never come, leaking the worker thread + upstream kube
+    connection. Watching ``receive()`` concurrently gives us a prompt signal.
+    """
+    try:
+        while True:
+            ev = await websocket.receive()
+            if ev.get("type") == "websocket.disconnect":
+                return
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        return
+
+
+async def _pump_until_disconnect(websocket, next_fn, on_item, teardown) -> None:
+    """Pump ``next_fn() -> on_item(item)`` until the stream ends or the client
+    disconnects, whichever comes first.
+
+    On disconnect we call ``teardown()`` immediately (``resp.close()`` /
+    ``watcher.stop()``) which tears the upstream socket and unblocks the
+    abandoned blocking ``next()`` worker thread, instead of leaving it parked
+    until the next event arrives.
+    """
+
+    async def producer():
+        while True:
+            item = await anyio.to_thread.run_sync(next_fn, abandon_on_cancel=True)
+            if item is _STREAM_END:
+                return
+            await on_item(item)
+
+    prod = asyncio.ensure_future(producer())
+    disc = asyncio.ensure_future(_await_disconnect(websocket))
+    try:
+        done, _pending = await asyncio.wait(
+            {prod, disc}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if disc in done:
+            teardown()  # unblock the parked next() thread so it doesn't leak
+        if prod in done and prod.exception() is not None:
+            raise prod.exception()
+    finally:
+        prod.cancel()
+        disc.cancel()
+        # Retrieve results so a finished-with-exception task doesn't warn.
+        for task in (prod, disc):
+            with contextlib.suppress(BaseException):
+                await task
 
 
 @ws_router.websocket("/ws/terminal")
@@ -162,9 +221,11 @@ async def ws_terminal(websocket: WebSocket, cluster_id: int):
     done = threading.Event()
 
     def _on_loop(coro):
+        # Bounded wait: a slow/half-open client must not block this worker thread
+        # (and the event loop hand-off) forever. On timeout, bail the session.
         try:
-            return asyncio.run_coroutine_threadsafe(coro, loop).result()
-        except Exception:  # noqa: BLE001 - loop closing / socket gone
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=15)
+        except Exception:  # noqa: BLE001 - loop closing / socket gone / timeout
             done.set()
 
     def _worker():
@@ -207,6 +268,12 @@ async def ws_terminal(websocket: WebSocket, cluster_id: int):
                 exec_ws.close()
             except Exception:  # noqa: BLE001
                 pass
+            owner = getattr(exec_ws, "_lensfy_api_client", None)
+            if owner is not None:  # release the dedicated exec ApiClient's pool
+                try:
+                    owner.close()
+                except Exception:  # noqa: BLE001
+                    pass
             _on_loop(_safe_close(websocket))  # unblock the receive loop
 
     worker = threading.Thread(target=_worker, name="lensfy-exec", daemon=True)
@@ -431,13 +498,18 @@ async def ws_events(websocket: WebSocket, cluster_id: int):
         def _next():
             return next(stream, _STREAM_END)
 
-        while True:
-            item = await anyio.to_thread.run_sync(_next, abandon_on_cancel=True)
-            if item is _STREAM_END:
-                break
+        def _teardown():
+            try:
+                watcher.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+        async def _on_item(item):
             row = row_fn(item["object"])
             row["event_type"] = item.get("type")
             await websocket.send_json(row)
+
+        await _pump_until_disconnect(websocket, _next, _on_item, _teardown)
     except WorkloadServiceError as exc:
         await _safe_send_json(websocket, {"error": str(exc)})
     except (WebSocketDisconnect, asyncio.CancelledError):
@@ -474,18 +546,26 @@ async def ws_watch(websocket: WebSocket, cluster_id: int, kind: str):
         def _next():
             return next(stream, _STREAM_END)
 
-        while True:
-            # abandon_on_cancel: on disconnect/shutdown the blocking next() would
-            # otherwise pin the cancellation until the next watch event arrives.
-            item = await anyio.to_thread.run_sync(_next, abandon_on_cancel=True)
-            if item is _STREAM_END:
-                break
+        def _teardown():
+            try:
+                watcher.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+        async def _on_item(item):
+            # When the server-side watch expires (410 Gone) or times out, the
+            # stream ends and the socket closes; the client reconnects (see
+            # watchInto) and the fresh watch re-sends an ADDED burst, recovering
+            # current state. Deletes missed during the gap reconcile on the next
+            # manual refresh — a deliberate tradeoff documented client-side.
             try:
                 row = fmt(item["object"])
             except Exception as exc:  # noqa: BLE001 - skip rows we can't format
                 logger.debug("ws/watch row format failed (%s): %s", kind, exc)
-                continue
+                return
             await websocket.send_json({"type": item.get("type"), "row": row})
+
+        await _pump_until_disconnect(websocket, _next, _on_item, _teardown)
     except (WorkloadServiceError, KubernetesError) as exc:
         await _safe_send_json(websocket, {"error": str(exc)})
     except (WebSocketDisconnect, asyncio.CancelledError):
@@ -531,7 +611,11 @@ async def ws_ai(websocket: WebSocket, cluster_id: int):
         async def approve(req: dict) -> bool:
             await websocket.send_json({"type": "approval_request", **req})
             while True:
-                msg = json.loads(await websocket.receive_text())
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue  # ignore stray/malformed frames instead of killing the socket
                 if msg.get("type") == "approval" and msg.get("id") == req["id"]:
                     return bool(msg.get("approved"))
 
@@ -571,16 +655,35 @@ async def ws_metrics(websocket: WebSocket, cluster_id: int):
     await websocket.accept()
     try:
         client = await anyio.to_thread.run_sync(_build_client, cluster_id)
-        while True:
-            try:
-                metrics = await anyio.to_thread.run_sync(
-                    client.cluster_metrics, abandon_on_cancel=True
-                )
-            except KubernetesError as exc:
-                await _safe_send_json(websocket, {"error": str(exc)})
-                break
-            await websocket.send_json(metrics.model_dump())
-            await anyio.sleep(interval)
+
+        async def _poll():
+            while True:
+                try:
+                    metrics = await anyio.to_thread.run_sync(
+                        client.cluster_metrics, abandon_on_cancel=True
+                    )
+                except KubernetesError as exc:
+                    await _safe_send_json(websocket, {"error": str(exc)})
+                    return
+                await websocket.send_json(metrics.model_dump())
+                await anyio.sleep(interval)
+
+        # Race the timer loop against client disconnect so a closed viewer stops
+        # the cluster polling promptly instead of up to `interval` seconds late.
+        poll = asyncio.ensure_future(_poll())
+        disc = asyncio.ensure_future(_await_disconnect(websocket))
+        try:
+            done, _pending = await asyncio.wait(
+                {poll, disc}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if poll in done and poll.exception() is not None:
+                raise poll.exception()
+        finally:
+            poll.cancel()
+            disc.cancel()
+            for task in (poll, disc):
+                with contextlib.suppress(BaseException):
+                    await task
     except WorkloadServiceError as exc:
         await _safe_send_json(websocket, {"error": str(exc)})
     except (WebSocketDisconnect, asyncio.CancelledError):

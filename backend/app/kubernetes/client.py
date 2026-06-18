@@ -879,8 +879,9 @@ class KubernetesClient:
         # race on that swap and could leave the shared client stuck routing REST
         # calls through the websocket path. A private client per exec is isolated
         # (and cheap — exec sessions are long-lived and few).
-        exec_core = client.CoreV1Api(client.ApiClient(self._api_client.configuration))
-        return stream(
+        exec_api_client = client.ApiClient(self._api_client.configuration)
+        exec_core = client.CoreV1Api(exec_api_client)
+        ws = stream(
             exec_core.connect_get_namespaced_pod_exec,
             name,
             namespace,
@@ -892,6 +893,14 @@ class KubernetesClient:
             tty=True,
             _preload_content=False,
         )
+        # Attach the owning ApiClient so the caller can release its connection
+        # pool when the session ends — otherwise the dedicated client (and its
+        # urllib3 PoolManager) is leaked for every terminal/node-shell session.
+        try:
+            ws._lensfy_api_client = exec_api_client
+        except Exception:  # noqa: BLE001 - WSClient should accept attributes
+            pass
+        return ws
 
     # --- workload operations (scale / restart / delete) ------------------
 
@@ -1200,11 +1209,22 @@ class KubernetesClient:
                         else None
                     ),
                 )
-                try:
-                    self._core.create_namespaced_pod_eviction(pn, pns, body)
-                    evicted += 1
-                except ApiException as exc:
-                    skipped.append({"pod": pn, "namespace": pns, "reason": exc.reason})
+                # 429 from the Eviction API means evicting now would violate a
+                # PodDisruptionBudget — a transient signal to back off and retry
+                # (what `kubectl drain` does), not a terminal failure.
+                deadline = time.monotonic() + 120
+                while True:
+                    try:
+                        self._core.create_namespaced_pod_eviction(pn, pns, body)
+                        evicted += 1
+                        break
+                    except ApiException as exc:
+                        if exc.status == 429 and time.monotonic() < deadline:
+                            time.sleep(2)
+                            continue
+                        reason = "bloqueado por PodDisruptionBudget (timeout)" if exc.status == 429 else exc.reason
+                        skipped.append({"pod": pn, "namespace": pns, "reason": reason})
+                        break
             return {"cordoned": True, "evicted": evicted, "skipped": skipped, "total": len(pods)}
 
         return self._guard("drain node", _do)

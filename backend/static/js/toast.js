@@ -32,9 +32,16 @@
       (COLORS[type] || COLORS.info) +
       ';box-shadow:var(--shadow-lg);color:var(--text-color);font-size:14px;' +
       'animation:toastIn .2s ease;';
-    el.innerHTML =
-      `<i class="fas ${ICONS[type] || ICONS.info}" style="color:${COLORS[type] || COLORS.info}"></i>` +
-      `<span style="flex:1">${message}</span>`;
+    // Build with textContent for the message — it carries backend/Kubernetes
+    // error text (resource names, field values) that must never be parsed as
+    // HTML (XSS via e.g. a pod named `<img src=x onerror=…>`).
+    const icon = document.createElement('i');
+    icon.className = `fas ${ICONS[type] || ICONS.info}`;
+    icon.style.color = COLORS[type] || COLORS.info;
+    const span = document.createElement('span');
+    span.style.flex = '1';
+    span.textContent = message == null ? '' : String(message);
+    el.append(icon, span);
     ensure().appendChild(el);
     setTimeout(() => {
       el.style.opacity = '0';

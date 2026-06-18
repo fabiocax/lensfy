@@ -24,6 +24,14 @@ def available() -> bool:
     return shutil.which("helm") is not None
 
 
+def _no_flag(value: str, field: str) -> str:
+    """Reject a positional value that helm would parse as a flag (argument
+    injection). Values are passed as argv (no shell), so this is the only gap."""
+    if value and str(value).startswith("-"):
+        raise HelmError(f"valor inválido para {field}: não pode começar com '-'")
+    return value
+
+
 def _run(cluster, args: list[str]) -> str:
     if not available():
         raise HelmError("Helm CLI não encontrado no sistema (instale o `helm`).")
@@ -50,15 +58,20 @@ def list_releases(cluster) -> list[dict]:
 
 
 def uninstall(cluster, name: str, namespace: str) -> str:
-    return _run(cluster, ["uninstall", name, "-n", namespace])
+    return _run(cluster, ["uninstall", _no_flag(name, "release"), "-n", namespace])
 
 
 def rollback(cluster, name: str, namespace: str, revision: int) -> str:
-    return _run(cluster, ["rollback", name, str(revision), "-n", namespace])
+    return _run(
+        cluster, ["rollback", _no_flag(name, "release"), str(revision), "-n", namespace]
+    )
 
 
 def install(cluster, name, chart, namespace, version=None, repo=None) -> str:
-    args = ["install", name, chart, "-n", namespace, "--create-namespace"]
+    args = [
+        "install", _no_flag(name, "release"), _no_flag(chart, "chart"),
+        "-n", namespace, "--create-namespace",
+    ]
     if repo:
         args += ["--repo", repo]
     if version:
@@ -67,7 +80,10 @@ def install(cluster, name, chart, namespace, version=None, repo=None) -> str:
 
 
 def upgrade(cluster, name, chart, namespace, version=None, repo=None) -> str:
-    args = ["upgrade", name, chart, "-n", namespace, "--install"]
+    args = [
+        "upgrade", _no_flag(name, "release"), _no_flag(chart, "chart"),
+        "-n", namespace, "--install",
+    ]
     if repo:
         args += ["--repo", repo]
     if version:

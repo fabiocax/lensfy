@@ -48,10 +48,13 @@ class ClusterService:
 
     def detect_contexts(self, source: KubeconfigSource) -> list[ContextInfo]:
         """List the contexts in a kubeconfig (path or pasted content) without importing."""
+        path = (
+            self._safe_kubeconfig_path(source.kubeconfig_path)
+            if source.kubeconfig_path
+            else None
+        )
         try:
-            return contexts_from_kubeconfig(
-                source.kubeconfig_path, source.kubeconfig_content
-            )
+            return contexts_from_kubeconfig(path, source.kubeconfig_content)
         except KubernetesError as exc:
             raise ClusterServiceError(str(exc)) from exc
 
@@ -162,12 +165,21 @@ class ClusterService:
             kubeconfig_path=path, contexts=list(ctx_to_name), insecure=insecure
         )
         clusters = self.import_from_kubeconfig(payload)
-        # Friendly name = GKE short name (the context is the long gke_… string).
+        # These all came from gcloud, so mark the provider unconditionally; give a
+        # friendly name (GKE short name; the context is the long gke_… string)
+        # only while it still equals the context, so a user rename isn't clobbered.
         for cluster in clusters:
             friendly = ctx_to_name.get(cluster.context)
-            if friendly and cluster.name == cluster.context:
-                cluster.name = friendly
+            if not friendly:
+                continue
+            changed = False
+            if cluster.provider != "gcp":
                 cluster.provider = "gcp"
+                changed = True
+            if cluster.name == cluster.context:
+                cluster.name = friendly
+                changed = True
+            if changed:
                 self.repo.add(cluster)
         return clusters
 
@@ -186,7 +198,12 @@ class ClusterService:
         return saved
 
     def delete(self, cluster_id: int) -> None:
+        from app.kubernetes.portforward import manager as pf_manager
+
         self.repo.delete(self.get(cluster_id))
+        # Tear down any port-forwards bound to this cluster — they hold a
+        # listening socket + a now-stale kube client otherwise.
+        pf_manager.stop_for_cluster(cluster_id)
         invalidate_client_cache()  # free the cached client's connection pool
 
     def reorder(self, ordered_ids: list[int]) -> list[Cluster]:
@@ -224,12 +241,31 @@ class ClusterService:
     # --- helpers ----------------------------------------------------------
 
     @staticmethod
-    def _resolve_kubeconfig_path(payload: ClusterCreate) -> str | None:
+    def _safe_kubeconfig_path(raw: str) -> str:
+        """Sanitize a client-supplied kubeconfig path.
+
+        The API is loopback + device-token gated, but the path is still
+        unvalidated input reaching a filesystem read. ``resolve()`` collapses any
+        ``..`` traversal, and we reject pseudo-filesystems that never hold a
+        kubeconfig but could be probed (``/proc``, ``/sys``, ``/dev``). Real
+        kubeconfig locations (``~/.kube``, ``/etc/rancher``, ``/tmp``, …) are all
+        allowed; a missing/invalid file is reported by the downstream parser.
+        """
         import os
+        from pathlib import Path
+
+        p = Path(os.path.expanduser(raw)).resolve()
+        blocked = (Path("/proc"), Path("/sys"), Path("/dev"))
+        if any(p == b or p.is_relative_to(b) for b in blocked):
+            raise ClusterServiceError("Caminho de kubeconfig não permitido.")
+        return str(p)
+
+    @staticmethod
+    def _resolve_kubeconfig_path(payload: ClusterCreate) -> str | None:
         from uuid import uuid4
 
         if payload.kubeconfig_path:
-            return os.path.expanduser(payload.kubeconfig_path)
+            return ClusterService._safe_kubeconfig_path(payload.kubeconfig_path)
         if payload.kubeconfig_content:
             # Persist pasted/uploaded content to a managed file so the client can
             # keep loading the context by path after import.

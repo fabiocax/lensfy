@@ -108,18 +108,32 @@ class PortForwardManager:
             fwd.start(local_port)
         except OSError as exc:
             raise RuntimeError(f"não foi possível abrir a porta local: {exc}") from exc
-        self._forwards[fid] = fwd
+        with self._lock:
+            self._forwards[fid] = fwd
         return fwd.info()
 
     def list(self) -> list[dict]:
-        return [f.info() for f in self._forwards.values()]
+        with self._lock:
+            forwards = list(self._forwards.values())
+        return [f.info() for f in forwards]
 
     def stop(self, fid: int) -> bool:
-        fwd = self._forwards.pop(fid, None)
+        with self._lock:
+            fwd = self._forwards.pop(fid, None)
         if fwd is None:
             return False
         fwd.stop()
         return True
+
+    def stop_for_cluster(self, cluster_id) -> int:
+        """Tear down every forward bound to a cluster (call on remove/rotate)."""
+        with self._lock:
+            doomed = [f for f in self._forwards.values() if f.cluster_id == cluster_id]
+            for f in doomed:
+                self._forwards.pop(f.id, None)
+        for f in doomed:
+            f.stop()
+        return len(doomed)
 
 
 manager = PortForwardManager()

@@ -7,6 +7,7 @@ route returns a single recent slice, matching ``GET /api/logs`` in the spec.
 from fastapi import APIRouter, HTTPException, status
 
 from app.api.deps import WorkloadServiceDep
+from app.kubernetes.client import KubernetesError
 from app.services.workloads import WorkloadServiceError
 
 router = APIRouter()
@@ -21,14 +22,12 @@ def get_logs(
     container: str | None = None,
     tail_lines: int = 200,
 ):
+    # Delegate to client.pod_logs so API errors (pod not found, connection
+    # refused) come back as a wrapped KubernetesError instead of escaping as an
+    # unhandled 500. ClusterNotFoundError propagates to the global 404 handler.
     try:
         client = service._client(cluster_id)
-        text = client._core.read_namespaced_pod_log(
-            name=name,
-            namespace=namespace,
-            container=container,
-            tail_lines=tail_lines,
-        )
-    except WorkloadServiceError as exc:
+        text = client.pod_logs(name, namespace, container, tail_lines)
+    except (WorkloadServiceError, KubernetesError) as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     return {"name": name, "namespace": namespace, "logs": text}

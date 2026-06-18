@@ -118,6 +118,8 @@ def get_credentials(name: str, location: str, project: str, kubeconfig_path: str
     The generated context is read back from the file's ``current-context`` so we
     don't have to predict the ``gke_<project>_<loc>_<name>`` naming.
     """
+    if name.startswith("-"):  # positional arg helm/gcloud would parse as a flag
+        raise GcloudError(f"nome de cluster inválido: {name!r}")
     _run(
         [
             "container", "clusters", "get-credentials", name,

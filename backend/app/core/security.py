@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import secrets
 from urllib.parse import parse_qs
 
@@ -43,6 +44,14 @@ PUBLIC_API_PREFIXES = ("/api/onboarding",)
 _TEST_SENTINELS = ("testclient", "testserver")
 
 _token_cache: str | None = None
+_token_mtime: float | None = None
+
+
+def _path_has_prefix(path: str, prefixes: tuple[str, ...]) -> bool:
+    """Prefix match on path-segment boundaries (so ``/api/onboarding`` does not
+    match ``/api/onboarding_admin``). A bare ``str.startswith`` would silently
+    exempt any future route whose name merely *begins* with an exempt prefix."""
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
 
 
 def read_device_token() -> str | None:
@@ -51,16 +60,26 @@ def read_device_token() -> str | None:
     Never creates one — provisioning happens explicitly via the onboarding
     screen (:func:`ensure_device_token`), so first run shows onboarding instead
     of a token silently appearing.
+
+    The cache is keyed on the file's mtime and re-validated on every read (a
+    cheap ``stat`` of one small local file), so an out-of-band rotation or an
+    external write is picked up without a manual cache reset.
     """
-    global _token_cache
-    if _token_cache:
-        return _token_cache
+    global _token_cache, _token_mtime
     path = get_settings().data_dir / "device_token"
-    if path.exists():
-        token = path.read_text().strip()
-        if token:
-            _token_cache = token
-            return token
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:  # file absent (or unreadable) -> not provisioned
+        _token_cache = None
+        _token_mtime = None
+        return None
+    if _token_cache is not None and _token_mtime == mtime:
+        return _token_cache
+    token = path.read_text().strip()
+    if token:
+        _token_cache = token
+        _token_mtime = mtime
+        return token
     return None
 
 
@@ -68,9 +87,11 @@ def ensure_device_token() -> str:
     """Return the device token, generating + persisting it on first use.
 
     Stored at ``<data_dir>/device_token`` with ``0600`` perms. Idempotent: a
-    second call returns the existing token.
+    second call returns the existing token. The file is created atomically with
+    ``O_CREAT | O_EXCL`` so two concurrent callers converge on a single token
+    (the loser re-reads the winner's file) and the secret is never momentarily
+    world-readable (no write-then-chmod window).
     """
-    global _token_cache
     existing = read_device_token()
     if existing:
         return existing
@@ -78,19 +99,24 @@ def ensure_device_token() -> str:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     path = settings.data_dir / "device_token"
     token = secrets.token_urlsafe(32)
-    path.write_text(token)
     try:
-        path.chmod(0o600)
-    except OSError:  # best-effort on platforms without POSIX perms
-        pass
-    _token_cache = token
-    return token
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        # Another caller (or a previous run) already provisioned the token;
+        # the persisted file is the single source of truth.
+        reset_token_cache()
+        return read_device_token() or path.read_text().strip()
+    with os.fdopen(fd, "w") as f:
+        f.write(token)
+    reset_token_cache()  # force a re-stat so the cache captures the new mtime
+    return read_device_token() or token
 
 
 def reset_token_cache() -> None:
     """Drop the cached token (used by tests; also after token rotation)."""
-    global _token_cache
+    global _token_cache, _token_mtime
     _token_cache = None
+    _token_mtime = None
 
 
 def _host_only(host_header: str) -> str:
@@ -155,8 +181,8 @@ class LocalSecurityMiddleware:
         # (3) device token on the sensitive surface. CORS preflight (OPTIONS)
         # carries no credentials and only asks "would this be allowed" — exempt
         # it; the real request that follows still needs the token.
-        protected = path.startswith(PROTECTED_PREFIXES) and not path.startswith(
-            PUBLIC_API_PREFIXES
+        protected = _path_has_prefix(path, PROTECTED_PREFIXES) and not _path_has_prefix(
+            path, PUBLIC_API_PREFIXES
         )
         if method != "OPTIONS" and protected:
             if not self._token_ok(headers, scope):

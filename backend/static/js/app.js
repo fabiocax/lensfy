@@ -290,8 +290,12 @@
     if (cur) {
       try {
         const data = await api(`/resources?cluster_id=${cur.id}&kind=namespaces`);
+        // Guard against a rapid cluster switch: a slow response for the previous
+        // cluster must not clobber the picker for the one now selected.
+        if (current() !== cur) return;
         state.namespaces = data.rows.map((r) => r.name).sort();
       } catch (_) {
+        if (current() !== cur) return;
         state.namespaces = [];
       }
     }
@@ -1621,18 +1625,28 @@
       apply();
     }, { passive: false });
     let drag = null;
-    svg.addEventListener('mousedown', (e) => {
-      if (e.target.closest('.cmap-node')) return; // clique no nó abre detalhe
-      drag = { x: e.clientX, y: e.clientY, tx: tf.tx, ty: tf.ty };
-      wrap.classList.add('grabbing');
-    });
-    window.addEventListener('mousemove', (e) => {
+    // Pan listeners live only for the duration of a drag (added on mousedown,
+    // removed on mouseup) so re-rendering the map doesn't leak a new pair of
+    // permanent window listeners on every navigation/refresh.
+    const onMove = (e) => {
       if (!drag) return;
       tf.tx = drag.tx + (e.clientX - drag.x);
       tf.ty = drag.ty + (e.clientY - drag.y);
       apply();
+    };
+    const onUp = () => {
+      drag = null;
+      wrap.classList.remove('grabbing');
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    svg.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.cmap-node')) return; // clique no nó abre detalhe
+      drag = { x: e.clientX, y: e.clientY, tx: tf.tx, ty: tf.ty };
+      wrap.classList.add('grabbing');
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
     });
-    window.addEventListener('mouseup', () => { drag = null; wrap.classList.remove('grabbing'); });
     svg.querySelectorAll('.cmap-node').forEach((g) =>
       g.addEventListener('click', () => {
         const dk = g.dataset.dkind;

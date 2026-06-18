@@ -390,8 +390,11 @@
     <!-- PWA: registra o service worker e oferece instalação -->
     <script>
       if ('serviceWorker' in navigator) {
-        // Assets são network-first + cache-buster (?v=mtime), então um reload normal
-        // já pega as versões novas — sem auto-reload por controllerchange (evita loop).
+        // O SW serve os assets em network-first (cache só como fallback offline) e
+        // limpa caches antigos ao trocar de VERSION (ver sw.js), então um reload
+        // online sempre pega as versões novas. Sem auto-reload por
+        // controllerchange (evita loop). Offline pode servir um shell antigo até
+        // o próximo bump de VERSION.
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('SW falhou:', e));
         });
