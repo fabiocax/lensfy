@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#46a6f0"/>
+      <stop offset="1" stop-color="#2176c9"/>
+    </linearGradient>
+    <radialGradient id="glass" cx="0.4" cy="0.35" r="0.8">
+      <stop offset="0" stop-color="#0e1726"/>
+      <stop offset="1" stop-color="#1b2c44"/>
+    </radialGradient>
+  </defs>
+  <!-- background (maskable-safe: content kept within the central 80%) -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- camera lens / aperture -->
+  <circle cx="256" cy="256" r="138" fill="#ffffff"/>
+  <circle cx="256" cy="256" r="116" fill="url(#glass)"/>
+  <circle cx="256" cy="256" r="62" fill="none" stroke="#46a6f0" stroke-width="14" opacity="0.9"/>
+  <!-- specular highlight -->
+  <circle cx="212" cy="212" r="26" fill="#ffffff" opacity="0.85"/>
+  <circle cx="300" cy="300" r="12" fill="#46a6f0" opacity="0.7"/>
+</svg>

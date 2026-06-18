@@ -1,0 +1,12 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/main.py", "*/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 85

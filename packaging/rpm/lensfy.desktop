@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lensfy
+GenericName=Kubernetes Manager
+Comment=Gerenciador local de clusters Kubernetes
+Exec=lensfy open
+Icon=lensfy
+Terminal=false
+Categories=Development;
+Keywords=kubernetes;k8s;cluster;devops;lens;
+StartupNotify=true

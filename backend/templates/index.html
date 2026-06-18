@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <!-- O token de dispositivo NÃO é embutido aqui (evita que um shell cacheado
+         pelo PWA carregue um token vazio/antigo). A SPA o busca em runtime via
+         GET /api/onboarding/token; LENSFY_AUTH indica se a segurança está ligada. -->
+    <script>
+      window.LENSFY_AUTH = {{ 'true' if security_enabled else 'false' }};
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Lensfy - Gerenciador local de clusters Kubernetes">
+    <meta name="theme-color" content="#3498db">
+    <meta name="robots" content="noindex, nofollow">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='icons/icon.svg') }}">
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Lensfy">
+    <title>Lensfy — Kubernetes Manager</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Terminal (xterm.js): carregado ANTES do loader AMD do Monaco. O bundle do
+         xterm é UMD — se carregado depois que o loader define `define.amd`, ele
+         tenta um define() AMD anônimo (erro "one anonymous define") em vez de
+         anexar window.Terminal. Mantê-lo antes do loader garante o global. -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+    <!-- YAML editor (Monaco) -->
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+</head>
+<body>
+    <!-- Tela de onboarding (primeira execução): gera o token de dispositivo. -->
+    <div id="onboarding" class="onboarding" hidden>
+        <div class="onboarding-card">
+            <div class="onboarding-logo"><i class="fas fa-binoculars"></i></div>
+            <h1>Bem-vindo ao Lensfy</h1>
+            <p class="onboarding-lead">O Lensfy roda <strong>localmente</strong> no seu computador. Para proteger o acesso às APIs e à interface, vamos gerar um <strong>token de dispositivo</strong> exclusivo desta máquina — sem login nem senha.</p>
+            <div id="onb-intro">
+                <ul class="onboarding-points">
+                    <li><i class="fas fa-shield-halved"></i> Acesso restrito a este equipamento (apenas loopback).</li>
+                    <li><i class="fas fa-key"></i> O token fica salvo com segurança em <code>~/.lensfy/device_token</code>.</li>
+                    <li><i class="fas fa-bolt"></i> Gerado uma única vez; não precisa decorar nada.</li>
+                </ul>
+                <button id="onb-generate" class="btn btn-primary btn-lg"><i class="fas fa-key"></i> Gerar token e começar</button>
+            </div>
+            <div id="onb-done" hidden>
+                <label class="onboarding-label">Seu token de dispositivo</label>
+                <div class="onb-token-row">
+                    <input id="onb-token" type="text" readonly>
+                    <button id="onb-copy" class="btn" title="Copiar"><i class="fas fa-copy"></i></button>
+                </div>
+                <p class="onboarding-hint">Guarde-o apenas se for acessar a API por ferramentas externas (header <code>X-Lensfy-Token</code>). Ele permanece neste equipamento.</p>
+                <button id="onb-enter" class="btn btn-primary btn-lg"><i class="fas fa-arrow-right-to-bracket"></i> Entrar</button>
+            </div>
+        </div>
+    </div>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-brand">
+                <div class="logo-container"><i class="fas fa-binoculars"></i></div>
+                <h1>Lensfy</h1>
+                <span class="tag">local</span>
+                <span class="conn-indicator" id="conn-indicator" hidden><i class="fas fa-plug-circle-exclamation"></i> <span id="conn-text">Reconectando…</span></span>
+            </div>
+            <div class="header-search" id="header-search">
+                <i class="fas fa-magnifying-glass"></i>
+                <input id="global-search" type="text" autocomplete="off" spellcheck="false"
+                       placeholder="Buscar recurso…  (Pods, Secrets, RBAC, Métricas…)">
+                <kbd>/</kbd>
+                <div class="search-results" id="search-results" hidden></div>
+            </div>
+
+            <div class="header-actions">
+                <div class="ns-picker" id="ns-picker">
+                    <button class="ns-picker-btn" id="ns-btn" disabled title="Filtrar por namespace">
+                        <i class="fas fa-layer-group"></i>
+                        <span id="ns-label">Todos os namespaces</span>
+                        <i class="fas fa-chevron-down caret"></i>
+                    </button>
+                    <div class="ns-menu" id="ns-menu" hidden>
+                        <input class="input input-inline" id="ns-search" placeholder="buscar namespace…">
+                        <div class="ns-options" id="ns-options"></div>
+                    </div>
+                </div>
+                <span class="header-divider"></span>
+                <div class="toolbar header-nav">
+                    <button class="btn btn-icon" id="nav-issues" title="Problemas"><i class="fas fa-triangle-exclamation"></i></button>
+                    <button class="btn btn-icon" id="nav-budget" title="Recursos"><i class="fas fa-scale-balanced"></i></button>
+                    <button class="btn btn-icon" id="nav-map" title="Mapa"><i class="fas fa-diagram-project"></i></button>
+                </div>
+                <span class="header-divider"></span>
+                <div class="toolbar">
+                    <button class="btn btn-icon btn-ai" id="btn-ai" title="Assistente IA"><i class="fas fa-robot"></i></button>
+                    <button class="btn btn-icon" id="btn-refresh" title="Atualizar cluster"><i class="fas fa-rotate"></i></button>
+                    <button class="btn btn-icon" id="btn-kubectl" title="Shell kubectl do cluster"><i class="fas fa-terminal"></i></button>
+                    <button class="btn btn-icon" id="btn-forwards" title="Port forwards ativos"><i class="fas fa-plug"></i></button>
+                    <button class="btn btn-icon" id="btn-deploy" title="Deploy de manifestos"><i class="fas fa-cloud-arrow-up"></i></button>
+                    <button class="btn btn-icon" id="btn-install" title="Instalar aplicativo" hidden><i class="fas fa-download"></i></button>
+                </div>
+            </div>
+        </header>
+
+        <div class="layout">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="cluster-switcher">
+                    <button class="cluster-btn" id="cluster-btn">
+                        <span class="cluster-avatar" id="cluster-btn-avatar"></span>
+                        <div class="info">
+                            <div class="name" id="cluster-btn-name">Nenhum cluster</div>
+                            <div class="meta" id="cluster-btn-meta">Importe um kubeconfig</div>
+                        </div>
+                        <i class="fas fa-chevron-down caret"></i>
+                    </button>
+                    <div class="cluster-menu" id="cluster-menu" hidden>
+                        <input class="input input-inline" id="cluster-search" placeholder="buscar cluster…">
+                        <div class="cluster-options" id="cluster-options"></div>
+                        <button class="cluster-add" id="cluster-add"><i class="fas fa-plus"></i> Importar cluster</button>
+                    </div>
+                </div>
+                <nav class="resource-tree" id="resource-tree"></nav>
+            </aside>
+
+            <!-- Content -->
+            <main class="content">
+                <div class="content-header">
+                    <h2 id="view-title">Dashboard</h2>
+                    <div class="view-actions" id="view-actions"></div>
+                </div>
+                <div class="view-body" id="view-body"></div>
+
+                <!-- Painel inferior (dock estilo Lens): console, logs, YAML -->
+                <section class="dock" id="dock" hidden>
+                    <div class="dock-resize" id="dock-resize" title="Arraste para redimensionar"></div>
+                    <div class="dock-bar">
+                        <div class="dock-tabs" id="dock-tabs"></div>
+                        <span class="spacer" style="flex:1"></span>
+                        <button class="btn btn-icon btn-sm" id="dock-max" title="Maximizar / restaurar"><i class="fas fa-up-right-and-down-left-from-center"></i></button>
+                        <button class="btn btn-icon btn-sm" id="dock-close" title="Fechar painel (todas as abas)"><i class="fas fa-xmark"></i></button>
+                    </div>
+                    <!-- Painéis são clonados dos <template> abaixo, um por aba aberta -->
+                    <div class="dock-body" id="dock-body"></div>
+                </section>
+
+                <!-- Templates de painel do dock (clonados por instância/aba) -->
+                <template id="tpl-dock-logs">
+                    <div class="dock-pane">
+                        <div class="logs-toolbar">
+                            <span class="dock-pane-title logs-title">Logs</span>
+                            <span class="log-status logs-status"><span class="status-dot unknown"></span> <span>—</span></span>
+                            <select class="input input-inline logs-container" style="display:none"></select>
+                            <input class="input input-inline logs-search" placeholder="filtrar…">
+                            <label class="log-toggle"><input type="checkbox" class="logs-autoscroll" checked> Auto-scroll</label>
+                            <span class="log-count logs-count"></span>
+                            <span class="spacer"></span>
+                            <button class="btn btn-sm logs-copy" title="Copiar"><i class="fas fa-copy"></i></button>
+                            <button class="btn btn-sm logs-download" title="Baixar"><i class="fas fa-download"></i></button>
+                        </div>
+                        <div class="logs-output"></div>
+                    </div>
+                </template>
+                <template id="tpl-dock-term">
+                    <div class="dock-pane dock-pane-term">
+                        <div class="dock-subbar">
+                            <span class="dock-pane-title term-title">Console</span>
+                            <span class="spacer" style="flex:1"></span>
+                            <select class="input input-inline term-container-sel" style="display:none"></select>
+                        </div>
+                        <div class="term-container"></div>
+                    </div>
+                </template>
+                <template id="tpl-dock-yaml">
+                    <div class="dock-pane">
+                        <div class="dock-subbar">
+                            <span class="dock-pane-title yaml-title">YAML</span>
+                            <span class="log-status yaml-status"><span class="status-dot unknown"></span> <span>—</span></span>
+                            <span class="spacer" style="flex:1"></span>
+                            <button class="btn btn-sm yaml-history" title="Histórico de versões (até 5)"><i class="fas fa-clock-rotate-left"></i> Histórico</button>
+                            <button class="btn btn-sm yaml-diff" title="Comparar com o original"><i class="fas fa-code-compare"></i> Diff</button>
+                            <button class="btn btn-sm btn-primary yaml-apply"><i class="fas fa-check"></i> Aplicar</button>
+                        </div>
+                        <div class="yaml-editor"></div>
+                    </div>
+                </template>
+                <template id="tpl-dock-ai">
+                    <div class="dock-pane dock-pane-ai">
+                        <div class="dock-subbar">
+                            <span class="dock-pane-title ai-title"><i class="fas fa-robot"></i> Assistente IA</span>
+                            <span class="log-status muted ai-model"></span>
+                            <span class="spacer" style="flex:1"></span>
+                            <button class="btn btn-sm ai-save" disabled title="Salvar esta conversa como relatório"><i class="fas fa-floppy-disk"></i> Salvar</button>
+                            <button class="btn btn-sm ai-reports" title="Relatórios salvos"><i class="fas fa-clock-rotate-left"></i> Relatórios</button>
+                        </div>
+                        <div class="ai-chat">
+                            <div class="ai-messages"></div>
+                            <div class="ai-input-row">
+                                <textarea class="ai-input" rows="1" placeholder="Pergunte algo ou peça uma ação… (Enter envia, Shift+Enter quebra linha)"></textarea>
+                                <button class="btn btn-primary ai-send" disabled><i class="fas fa-paper-plane"></i></button>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </main>
+        </div>
+    </div>
+
+    <!-- Painel de detalhes do recurso (drawer lateral, estilo Lens) -->
+    <div class="drawer-backdrop" id="detail-backdrop"></div>
+    <aside class="detail-drawer" id="detail-drawer">
+        <div class="detail-header">
+            <div class="detail-title">
+                <span class="badge" id="detail-kind"></span>
+                <h3 id="detail-name">—</h3>
+            </div>
+            <button class="close-btn" id="detail-close">&times;</button>
+        </div>
+        <div class="detail-actions" id="detail-actions"></div>
+        <div class="detail-body" id="detail-body"></div>
+    </aside>
+
+    <!-- Importar cluster (2 passos: fonte do kubeconfig -> escolher contextos) -->
+    <div class="modal-backdrop" id="import-modal">
+        <div class="modal" style="width:min(640px,95vw)">
+            <div class="modal-header">
+                <h3>Importar cluster</h3>
+                <button class="close-btn" data-close>&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="seg" id="import-source">
+                    <button type="button" class="seg-btn active" data-src="path"><i class="fas fa-folder"></i> Caminho</button>
+                    <button type="button" class="seg-btn" data-src="file"><i class="fas fa-file-arrow-up"></i> Arquivo</button>
+                    <button type="button" class="seg-btn" data-src="paste"><i class="fas fa-paste"></i> Colar</button>
+                    <button type="button" class="seg-btn" data-src="gcloud"><i class="fas fa-cloud"></i> gcloud</button>
+                </div>
+                <div class="form-group" data-srcpane="path">
+                    <label>Caminho do kubeconfig</label>
+                    <input class="input" id="import-path" placeholder="~/.kube/config">
+                    <div class="form-hint">Em branco usa o kubeconfig padrão do sistema.</div>
+                </div>
+                <div class="form-group" data-srcpane="file" hidden>
+                    <label>Arquivo kubeconfig</label>
+                    <input type="file" id="import-file">
+                </div>
+                <div class="form-group" data-srcpane="paste" hidden>
+                    <label>Conteúdo do kubeconfig</label>
+                    <textarea class="input" id="import-paste" spellcheck="false"
+                              style="height:140px;font-family:var(--font-mono);font-size:var(--font-size-sm)"
+                              placeholder="cole aqui o YAML do kubeconfig"></textarea>
+                </div>
+                <div class="form-group" data-srcpane="gcloud" hidden>
+                    <label>Projeto do Google Cloud</label>
+                    <div style="display:flex;gap:var(--space-2)">
+                        <select class="input" id="gcloud-project" style="flex:1"></select>
+                        <button class="btn" id="gcloud-list" type="button"><i class="fas fa-magnifying-glass"></i> Listar clusters</button>
+                    </div>
+                    <div class="form-hint" id="gcloud-hint"></div>
+                </div>
+                <label class="check-row" title="Use para certificados self-signed ou rotacionados">
+                    <input type="checkbox" id="import-insecure">
+                    <span>Ignorar verificação TLS <span class="form-hint" style="display:inline">(inseguro)</span></span>
+                </label>
+                <button class="btn" id="import-detect"><i class="fas fa-magnifying-glass"></i> Detectar contextos</button>
+                <div id="import-contexts"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" data-close>Cancelar</button>
+                <button class="btn btn-primary" id="import-do" disabled><i class="fas fa-download"></i> Importar selecionados</button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Helm: instalar release -->
+    <div class="modal-backdrop" id="helm-modal">
+        <div class="modal" style="width:min(560px,94vw)">
+            <div class="modal-header">
+                <h3>Instalar release Helm</h3>
+                <button class="close-btn" data-close>&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group"><label>Nome da release</label><input class="input" id="helm-name" placeholder="meu-release"></div>
+                <div class="form-group"><label>Chart</label><input class="input" id="helm-chart" placeholder="nginx (ou ./caminho, oci://…)"></div>
+                <div class="form-group"><label>Repositório (opcional)</label><input class="input" id="helm-repo" placeholder="https://charts.bitnami.com/bitnami"></div>
+                <div class="form-group"><label>Versão (opcional)</label><input class="input" id="helm-version" placeholder="latest"></div>
+                <div class="form-group"><label>Namespace</label><input class="input" id="helm-ns" placeholder="default"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" data-close>Cancelar</button>
+                <button class="btn btn-primary" id="helm-do-install"><i class="fas fa-download"></i> Instalar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Port forwards ativos -->
+    <div class="modal-backdrop" id="fwd-modal">
+        <div class="modal" style="width:min(720px,95vw)">
+            <div class="modal-header">
+                <h3>Port forwards</h3>
+                <button class="close-btn" data-close>&times;</button>
+            </div>
+            <div class="modal-body"><div id="fwd-body"></div></div>
+        </div>
+    </div>
+
+    <!-- Viewer de dados (Secrets / ConfigMaps) -->
+    <div class="modal-backdrop" id="data-modal">
+        <div class="modal" style="width:min(840px,95vw)">
+            <div class="modal-header">
+                <h3 id="data-title">Dados</h3>
+                <button class="close-btn" data-close>&times;</button>
+            </div>
+            <div class="modal-body"><div id="data-body"></div></div>
+        </div>
+    </div>
+
+    <!-- Deploy de manifestos (drag-and-drop) -->
+    <div class="modal-backdrop" id="deploy-modal">
+        <div class="modal" style="width:min(900px,96vw)">
+            <div class="modal-header">
+                <h3>Deploy de manifestos</h3>
+                <button class="close-btn" data-close>&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="deploy-toolbar">
+                    <select class="input input-inline" id="deploy-template">
+                        <option value="">+ Inserir template…</option>
+                        <option value="namespace">Namespace</option>
+                        <option value="deployment">Deployment</option>
+                        <option value="service">Service</option>
+                        <option value="configmap">ConfigMap</option>
+                        <option value="secret">Secret</option>
+                        <option value="pod">Pod</option>
+                        <option value="ingress">Ingress</option>
+                        <option value="job">Job</option>
+                        <option value="cronjob">CronJob</option>
+                    </select>
+                    <button type="button" class="btn btn-sm" id="btn-builder"><i class="fas fa-wand-magic-sparkles"></i> Construtor</button>
+                    <button type="button" class="btn btn-sm" id="dz-files-btn"><i class="fas fa-file"></i> Arquivos</button>
+                    <button type="button" class="btn btn-sm" id="dz-dir-btn"><i class="fas fa-folder"></i> Pasta</button>
+                    <label class="ns-inline">
+                        Namespace
+                        <input class="input input-inline" id="deploy-ns" placeholder="default">
+                    </label>
+                    <input type="file" id="dz-files" accept=".yaml,.yml" multiple hidden>
+                    <input type="file" id="dz-dir" webkitdirectory hidden>
+                </div>
+                <div id="deploy-builder" class="deploy-builder" hidden>
+                    <div class="builder-row">
+                        <label>Tipo de recurso</label>
+                        <select class="input input-inline" id="builder-kind"></select>
+                    </div>
+                    <div id="builder-fields" class="builder-fields"></div>
+                    <button class="btn btn-sm btn-primary" id="builder-gen"><i class="fas fa-arrow-down"></i> Gerar para o editor</button>
+                </div>
+                <div id="drop-zone" class="drop-zone-slim">
+                    <i class="fas fa-cloud-arrow-up"></i> Arraste arquivos YAML ou uma pasta aqui
+                </div>
+                <div id="deploy-editor" class="deploy-editor"></div>
+                <div id="deploy-results"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" data-close>Fechar</button>
+                <button class="btn" id="deploy-validate"><i class="fas fa-circle-check"></i> Validar</button>
+                <button class="btn btn-primary" id="deploy-apply"><i class="fas fa-rocket"></i> Aplicar</button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Relatórios salvos da IA -->
+    <div class="modal-backdrop" id="reports-modal">
+        <div class="modal" style="width:min(860px,95vw)">
+            <div class="modal-header">
+                <h3><i class="fas fa-robot"></i> Relatórios da IA</h3>
+                <button class="close-btn" data-close>&times;</button>
+            </div>
+            <div class="modal-body"><div id="reports-body"></div></div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/toast.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <!-- PWA: registra o service worker e oferece instalação -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        // Assets são network-first + cache-buster (?v=mtime), então um reload normal
+        // já pega as versões novas — sem auto-reload por controllerchange (evita loop).
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('SW falhou:', e));
+        });
+      }
+      let deferredPrompt = null;
+      const installBtn = document.getElementById('btn-install');
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+        if (installBtn) installBtn.hidden = false;
+      });
+      if (installBtn) {
+        installBtn.addEventListener('click', async () => {
+          if (!deferredPrompt) return;
+          deferredPrompt.prompt();
+          const { outcome } = await deferredPrompt.userChoice;
+          deferredPrompt = null;
+          installBtn.hidden = true;
+          if (window.toast) window.toast(outcome === 'accepted' ? 'Lensfy instalado' : 'Instalação cancelada', outcome === 'accepted' ? 'success' : 'info');
+        });
+      }
+      window.addEventListener('appinstalled', () => {
+        if (installBtn) installBtn.hidden = true;
+      });
+    </script>
+</body>
+</html>
