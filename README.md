@@ -109,7 +109,16 @@ Depois:
 lensfy            # inicia (se preciso) e abre no navegador
 lensfy status     # estado + health
 lensfy stop       # para
+lensfy update     # baixa a última versão do GitHub e atualiza no lugar
+lensfy version    # mostra a versão instalada (commit de origem)
 ```
+
+**Atualizar:** `lensfy update` clona a última versão de
+`github.com/fabiocax/lensfy`, reinstala no lugar (preservando seus dados em
+`~/.lensfy`) e reinicia se estava rodando — incluindo o serviço systemd, se
+configurado. Não faz nada se já estiver na versão mais recente (`--force`
+reinstala mesmo assim). Origem e branch são configuráveis via `LENSFY_REPO` e
+`LENSFY_BRANCH`. Requer `git`.
 
 Ou abra **"Lensfy"** no menu de aplicativos. Layout instalado:
 
@@ -166,6 +175,7 @@ Na **raiz** do projeto:
 ./lensfy.sh status    # estado + health
 ./lensfy.sh logs      # acompanha o log
 ./lensfy.sh restart   # reinicia
+./lensfy.sh update    # git pull + atualiza dependências + reinicia
 ./stop.sh             # para (encerra o grupo de processos)
 ```
 
@@ -203,7 +213,7 @@ Todas com prefixo `LENSFY_`. Veja `backend/.env.example` (copie para `backend/.e
 | `LENSFY_ANTHROPIC_API_KEY` | — | Habilita o assistente de IA (Claude API). |
 | `LENSFY_ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Modelo do assistente. |
 | `LENSFY_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Endpoint da API (override p/ proxy/gateway). |
-| `LENSFY_AI_ALLOW_MUTATIONS` | `true` | `false` deixa a IA só diagnosticar. |
+| `LENSFY_AI_ALLOW_MUTATIONS` | `false` | `true` permite ações que alteram o cluster (cada uma ainda exige aprovação na UI). Padrão: só diagnostica. |
 
 Exemplos:
 

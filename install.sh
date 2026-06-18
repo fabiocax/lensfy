@@ -57,10 +57,20 @@ if ! "$VENV/bin/pip" install -r "$APP/requirements.txt"; then
   "$VENV/bin/pip" install --only-binary=:all: -r "$APP/requirements.txt"
 fi
 
-# 3) Instala o launcher.
+# 3) Instala o launcher — de forma atômica (escreve em temp + mv), para que um
+#    `lensfy update` em andamento possa substituir o próprio launcher sem
+#    corromper o processo bash que ainda o executa (o inode antigo permanece).
 echo "→ Instalando comando 'lensfy' em $BIN"
 mkdir -p "$BIN"
-install -m 0755 "$ROOT/packaging/lensfy" "$BIN/lensfy"
+_launcher_tmp="$BIN/.lensfy.$$"
+install -m 0755 "$ROOT/packaging/lensfy" "$_launcher_tmp"
+mv -f "$_launcher_tmp" "$BIN/lensfy"
+
+# Registra o commit de origem (quando instalado a partir de um checkout git) para
+# o `lensfy update` poder comparar a versão instalada com a do repositório.
+if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --short HEAD >/dev/null 2>&1; then
+  git -C "$ROOT" rev-parse --short HEAD > "$PREFIX/source_ref" 2>/dev/null || true
+fi
 
 # 4) Atalho no menu de aplicativos + ícone.
 echo "→ Criando atalho no menu de aplicativos"
@@ -118,4 +128,5 @@ case ":$PATH:" in
      echo "         echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc" ;;
 esac
 [[ $SERVICE -eq 0 ]] && echo "  Dica: ./install.sh --service  para iniciar automaticamente no login."
+echo "  Atualizar:   lensfy update    (baixa a última versão do GitHub)"
 echo "  Desinstalar: ./uninstall.sh"

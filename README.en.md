@@ -109,7 +109,16 @@ Then:
 lensfy            # starts (if needed) and opens the browser
 lensfy status     # state + health
 lensfy stop       # stop
+lensfy update     # fetch the latest version from GitHub and update in place
+lensfy version    # show the installed version (source commit)
 ```
+
+**Updating:** `lensfy update` clones the latest from
+`github.com/fabiocax/lensfy`, reinstalls in place (preserving your data in
+`~/.lensfy`) and restarts if it was running — including the systemd service when
+configured. It's a no-op if already up to date (`--force` reinstalls anyway).
+Origin and branch are configurable via `LENSFY_REPO` and `LENSFY_BRANCH`.
+Requires `git`.
 
 Or open **"Lensfy"** from the application menu. Installed layout:
 
@@ -166,6 +175,7 @@ From the project **root**:
 ./lensfy.sh status    # state + health
 ./lensfy.sh logs      # follow the log
 ./lensfy.sh restart   # restart
+./lensfy.sh update    # git pull + refresh dependencies + restart
 ./stop.sh             # stop (terminates the process group)
 ```
 
@@ -203,7 +213,7 @@ All prefixed with `LENSFY_`. See `backend/.env.example` (copy it to `backend/.en
 | `LENSFY_ANTHROPIC_API_KEY` | — | Enables the AI assistant (Claude API). |
 | `LENSFY_ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Assistant model. |
 | `LENSFY_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API endpoint (override for a proxy/gateway). |
-| `LENSFY_AI_ALLOW_MUTATIONS` | `true` | `false` makes the AI diagnose-only. |
+| `LENSFY_AI_ALLOW_MUTATIONS` | `false` | `true` allows cluster-changing actions (each still needs UI approval). Default: diagnose-only. |
 
 Examples:
 

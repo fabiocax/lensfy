@@ -7,6 +7,7 @@
 #   ./lensfy.sh restart    para e inicia de novo
 #   ./lensfy.sh status     mostra estado + health
 #   ./lensfy.sh logs       acompanha o log (tail -f)
+#   ./lensfy.sh update     git pull + atualiza dependências + reinicia (se rodando)
 #
 # Variáveis de ambiente:
 #   LENSFY_HOST    (default 127.0.0.1)  — use 0.0.0.0 para expor na rede (CUIDADO: sem auth)
@@ -108,11 +109,39 @@ status() {
   fi
 }
 
+update() {
+  command -v git >/dev/null 2>&1 || { echo "erro: 'git' é necessário para atualizar." >&2; exit 1; }
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || {
+    echo "erro: $ROOT não é um repositório git (use o instalador: 'lensfy update')." >&2; exit 1; }
+
+  local was_running=0; is_running && was_running=1
+  local before after
+  before="$(git -C "$ROOT" rev-parse --short HEAD)"
+  echo "→ git pull --ff-only …"
+  if ! git -C "$ROOT" pull --ff-only; then
+    echo "✗ git pull falhou — resolva mudanças locais e tente de novo." >&2; exit 1
+  fi
+  after="$(git -C "$ROOT" rev-parse --short HEAD)"
+  if [[ "$before" == "$after" ]]; then
+    echo "✓ já está na versão mais recente ($after)."
+  else
+    echo "→ $before → $after"
+    # Reinstala dependências só se requirements.txt mudou entre as duas revisões.
+    if [[ -x "$VENV/bin/pip" ]] && ! git -C "$ROOT" diff --quiet "$before" "$after" -- backend/requirements.txt; then
+      echo "→ requirements.txt mudou; atualizando dependências …"
+      "$VENV/bin/pip" install -r "$BACKEND/requirements.txt" \
+        || "$VENV/bin/pip" install --only-binary=:all: -r "$BACKEND/requirements.txt"
+    fi
+  fi
+  if [[ $was_running -eq 1 ]]; then echo "→ reiniciando …"; stop; start; fi
+}
+
 case "${1:-}" in
   start)   start ;;
   stop)    stop ;;
   restart) stop; start ;;
   status)  status ;;
   logs)    exec tail -n 100 -f "$LOG_FILE" ;;
-  *) echo "uso: $0 {start|stop|restart|status|logs}" >&2; exit 2 ;;
+  update)  update ;;
+  *) echo "uso: $0 {start|stop|restart|status|logs|update}" >&2; exit 2 ;;
 esac

@@ -9,8 +9,12 @@
 #   lensfy status     estado + health
 #   lensfy logs       acompanha o log
 #   lensfy open       abre o navegador (inicia se preciso)
+#   lensfy update     baixa a última versão do GitHub e atualiza no lugar
+#   lensfy version    mostra a versão instalada
 #
 # Variáveis: LENSFY_HOST (127.0.0.1), LENSFY_PORT (8000), demais LENSFY_* repassadas.
+#   LENSFY_REPO   (default https://github.com/fabiocax/lensfy.git) — origem do update
+#   LENSFY_BRANCH (default main)
 set -euo pipefail
 
 PREFIX="${LENSFY_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/lensfy}"
@@ -19,9 +23,12 @@ VENV="$PREFIX/venv"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/lensfy"
 PID_FILE="$STATE/lensfy.pid"
 LOG_FILE="$STATE/lensfy.log"
+REF_FILE="$PREFIX/source_ref"
 HOST="${LENSFY_HOST:-127.0.0.1}"
 PORT="${LENSFY_PORT:-8000}"
 URL="http://$HOST:$PORT"
+REPO_URL="${LENSFY_REPO:-https://github.com/fabiocax/lensfy.git}"
+REPO_BRANCH="${LENSFY_BRANCH:-main}"
 
 is_running() { [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; }
 
@@ -93,12 +100,81 @@ open_app() {
   open_browser
 }
 
+version() {
+  local ref; ref="$(cat "$REF_FILE" 2>/dev/null || echo 'desconhecida')"
+  echo "Lensfy — versão instalada: $ref"
+}
+
+# Como o servidor está rodando agora: systemd (--service), launcher (PID) ou none.
+run_mode() {
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user is-active lensfy.service >/dev/null 2>&1; then
+    echo systemd
+  elif is_running; then
+    echo launcher
+  else
+    echo none
+  fi
+}
+
+update() {
+  local force=0
+  [[ "${1:-}" == "--force" || "${1:-}" == "-f" ]] && force=1
+
+  command -v git >/dev/null 2>&1 || { echo "erro: 'git' é necessário para atualizar." >&2; exit 1; }
+  if [[ ! -x "$VENV/bin/uvicorn" ]]; then
+    echo "erro: instalação não encontrada em $PREFIX (rode install.sh)" >&2; exit 1
+  fi
+
+  local tmp; tmp="$(mktemp -d "${TMPDIR:-/tmp}/lensfy-update.XXXXXX")"
+  # Valor embutido (aspas duplas) para o trap não referenciar a variável local
+  # já fora de escopo no EXIT (quebraria com `set -u`).
+  trap "rm -rf '$tmp'" EXIT
+
+  echo "→ Buscando a última versão de $REPO_URL ($REPO_BRANCH) …"
+  if ! git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$tmp/src" >/dev/null 2>&1; then
+    echo "✗ falha ao baixar o repositório — verifique a rede e $REPO_URL" >&2; exit 1
+  fi
+
+  local newref oldref
+  newref="$(git -C "$tmp/src" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  oldref="$(cat "$REF_FILE" 2>/dev/null || echo '')"
+  if [[ -n "$oldref" && "$newref" == "$oldref" && $force -eq 0 ]]; then
+    echo "✓ Já está na versão mais recente ($newref). Use 'lensfy update --force' para reinstalar."
+    return 0
+  fi
+  [[ -x "$tmp/src/install.sh" ]] || { echo "✗ install.sh ausente no repositório baixado" >&2; exit 1; }
+
+  local mode; mode="$(run_mode)"
+  case "$mode" in
+    systemd)  echo "→ Parando o serviço para atualizar …"; systemctl --user stop lensfy.service || true ;;
+    launcher) echo "→ Parando para atualizar …"; stop || true ;;
+  esac
+
+  echo "→ Atualizando ${oldref:-?} → ${newref} (preservando seus dados em ~/.lensfy) …"
+  if ! ( cd "$tmp/src" && LENSFY_PREFIX="$PREFIX" bash ./install.sh ); then
+    echo "✗ a atualização falhou — a instalação anterior foi mantida." >&2
+    # Tenta religar no estado anterior.
+    [[ "$mode" == "systemd" ]] && systemctl --user start lensfy.service || true
+    [[ "$mode" == "launcher" ]] && start || true
+    exit 1
+  fi
+
+  case "$mode" in
+    systemd)  echo "→ Reiniciando o serviço …"; systemctl --user start lensfy.service || true ;;
+    launcher) echo "→ Reiniciando …"; start ;;
+    *)        echo "  (servidor não estava rodando; inicie com 'lensfy')" ;;
+  esac
+  echo "✓ Lensfy atualizado para ${newref}."
+}
+
 case "${1:-open}" in
   start)   start ;;
   stop)    stop ;;
   restart) stop; start ;;
   status)  status ;;
   logs)    mkdir -p "$STATE"; exec tail -n 100 -f "$LOG_FILE" ;;
+  update)  shift; update "$@" ;;
+  version|--version|-v) version ;;
   open|"") open_app ;;
-  *) echo "uso: lensfy {start|stop|restart|status|logs|open}" >&2; exit 2 ;;
+  *) echo "uso: lensfy {start|stop|restart|status|logs|update|version|open}" >&2; exit 2 ;;
 esac
