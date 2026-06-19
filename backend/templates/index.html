@@ -338,6 +338,8 @@
                         <option value="">+ Inserir template…</option>
                         <option value="namespace">Namespace</option>
                         <option value="deployment">Deployment</option>
+                        <option value="statefulset">StatefulSet</option>
+                        <option value="daemonset">DaemonSet</option>
                         <option value="service">Service</option>
                         <option value="configmap">ConfigMap</option>
                         <option value="secret">Secret</option>
@@ -345,13 +347,22 @@
                         <option value="ingress">Ingress</option>
                         <option value="job">Job</option>
                         <option value="cronjob">CronJob</option>
+                        <option value="pvc">PersistentVolumeClaim</option>
+                        <option value="hpa">HorizontalPodAutoscaler</option>
+                        <option value="serviceaccount">ServiceAccount</option>
+                        <option value="networkpolicy">NetworkPolicy</option>
                     </select>
                     <button type="button" class="btn btn-sm" id="btn-builder"><i class="fas fa-wand-magic-sparkles"></i> Construtor</button>
                     <button type="button" class="btn btn-sm" id="dz-files-btn"><i class="fas fa-file"></i> Arquivos</button>
                     <button type="button" class="btn btn-sm" id="dz-dir-btn"><i class="fas fa-folder"></i> Pasta</button>
+                    <span style="flex:1"></span>
+                    <button type="button" class="btn btn-sm btn-icon" id="deploy-copy" title="Copiar YAML"><i class="fas fa-copy"></i></button>
+                    <button type="button" class="btn btn-sm btn-icon" id="deploy-download" title="Baixar YAML"><i class="fas fa-download"></i></button>
+                    <button type="button" class="btn btn-sm btn-icon" id="deploy-clear" title="Limpar editor"><i class="fas fa-eraser"></i></button>
                     <label class="ns-inline">
                         Namespace
-                        <input class="input input-inline" id="deploy-ns" placeholder="default">
+                        <input class="input input-inline" id="deploy-ns" placeholder="default" list="deploy-ns-list" autocomplete="off">
+                        <datalist id="deploy-ns-list"></datalist>
                     </label>
                     <input type="file" id="dz-files" accept=".yaml,.yml" multiple hidden>
                     <input type="file" id="dz-dir" webkitdirectory hidden>
@@ -373,6 +384,7 @@
             <div class="modal-footer">
                 <button class="btn" data-close>Fechar</button>
                 <button class="btn" id="deploy-validate"><i class="fas fa-circle-check"></i> Validar</button>
+                <button class="btn" id="deploy-diff"><i class="fas fa-code-compare"></i> Prévia (diff)</button>
                 <button class="btn btn-primary" id="deploy-apply"><i class="fas fa-rocket"></i> Aplicar</button>
             </div>
         </div>

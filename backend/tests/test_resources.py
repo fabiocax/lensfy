@@ -483,6 +483,129 @@ def test_topology_endpoint(client, db_session, monkeypatch):
     assert body["nodes"][0]["kind"] == "ingress"
 
 
+def test_diff_helpers_clean_and_compare():
+    from app.kubernetes.client import _clean_for_diff, _diff_dicts
+
+    live = {
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": "cm", "resourceVersion": "42", "uid": "x",
+                     "managedFields": [{"a": 1}],
+                     "annotations": {"kubectl.kubernetes.io/last-applied-configuration": "{}",
+                                     "keep": "yes"}},
+        "data": {"a": "1", "b": "2"},
+        "status": {"ignored": True},
+    }
+    cleaned = _clean_for_diff(live)
+    assert "status" not in cleaned
+    assert "resourceVersion" not in cleaned["metadata"]
+    assert "managedFields" not in cleaned["metadata"]
+    # the last-applied annotation is dropped, real annotations kept
+    assert cleaned["metadata"]["annotations"] == {"keep": "yes"}
+
+    new = {**cleaned, "data": {"a": "1", "b": "3", "c": "4"}}
+    changes = _diff_dicts(cleaned, new)
+    paths = {c["path"]: (c["old"], c["new"]) for c in changes}
+    assert paths["data.b"] == ("2", "3")
+    assert paths["data.c"] == (None, "4")
+    assert "data.a" not in paths  # unchanged
+
+
+def _fake_dyn_client(existing_names, live_by_name=None):
+    """A minimal stand-in for the dynamic client: tracks server_side_apply calls
+    and reports which named objects already exist."""
+    from kubernetes.dynamic.exceptions import NotFoundError
+
+    applied = []
+
+    class FakeRes:
+        namespaced = True
+
+        def get(self, name, namespace=None):
+            if name not in existing_names:
+                raise NotFoundError.__new__(NotFoundError)
+            return NS(to_dict=lambda: (live_by_name or {}).get(name, {}))
+
+    class FakeDyn:
+        resources = NS(get=lambda api_version, kind: FakeRes())
+
+        def server_side_apply(self, resource, body=None, name=None, namespace=None,
+                              force_conflicts=None, **kw):
+            applied.append({"name": name, "dry_run": kw.get("dry_run"),
+                            "fm": kw.get("field_manager")})
+            return NS(to_dict=lambda: dict(body))
+
+    return FakeDyn(), applied
+
+
+def test_apply_documents_create_vs_configure():
+    from app.kubernetes.client import KubernetesClient
+
+    kc = object.__new__(KubernetesClient)
+    kc._dynamic, applied = _fake_dyn_client(existing_names={"existente"})
+    yaml_text = (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: novo\ndata:\n  a: '1'\n"
+        "---\n"
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: existente\ndata:\n  a: '2'\n"
+    )
+    results = kc.apply_documents(yaml_text, "default")
+    by_name = {r["name"]: r for r in results}
+    assert by_name["novo"]["status"] == "created"
+    assert by_name["existente"]["status"] == "configured"
+    # both went through server-side apply (no dry-run) with our field manager
+    assert all(a["dry_run"] is None and a["fm"] == "lensfy" for a in applied)
+
+
+def test_diff_documents_create_and_update():
+    from app.kubernetes.client import KubernetesClient
+
+    live = {"existente": {"apiVersion": "v1", "kind": "ConfigMap",
+                          "metadata": {"name": "existente", "resourceVersion": "9"},
+                          "data": {"a": "1"}}}
+    kc = object.__new__(KubernetesClient)
+    kc._dynamic, applied = _fake_dyn_client(existing_names={"existente"}, live_by_name=live)
+    yaml_text = (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: novo\ndata:\n  a: '1'\n"
+        "---\n"
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: existente\ndata:\n  a: '2'\n"
+    )
+    results = kc.diff_documents(yaml_text, "default")
+    by_name = {r["name"]: r for r in results}
+    assert by_name["novo"]["action"] == "create"
+    assert by_name["existente"]["action"] == "update"
+    chg = {c["path"]: (c["old"], c["new"]) for c in by_name["existente"]["changes"]}
+    assert chg["data.a"] == ("1", "2")
+    # the update path used a dry-run apply
+    assert any(a["dry_run"] == "All" for a in applied)
+
+
+def test_apply_and_diff_endpoints(client, db_session, monkeypatch):
+    db_session.add(Cluster(name="c", context="ctx"))
+    db_session.commit()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def apply_documents(self, yaml_text, default_namespace):
+            return [{"kind": "ConfigMap", "name": "a", "namespace": default_namespace, "status": "created"},
+                    {"kind": "Service", "name": "b", "namespace": default_namespace, "status": "configured"}]
+
+        def diff_documents(self, yaml_text, default_namespace):
+            return [{"kind": "ConfigMap", "name": "a", "namespace": default_namespace,
+                     "action": "update", "changes": [{"path": "data.x", "old": "1", "new": "2"}]}]
+
+    monkeypatch.setattr(workloads_service, "get_client", lambda *a, **k: FakeClient())
+    ap = client.post("/api/resources/apply?cluster_id=1",
+                     json={"yaml": "kind: ConfigMap", "namespace": "team"})
+    assert ap.status_code == 200
+    assert [r["status"] for r in ap.json()["results"]] == ["created", "configured"]
+    df = client.post("/api/resources/diff?cluster_id=1",
+                     json={"yaml": "kind: ConfigMap", "namespace": "team"})
+    assert df.status_code == 200
+    assert df.json()["results"][0]["action"] == "update"
+    assert df.json()["results"][0]["changes"][0]["path"] == "data.x"
+
+
 def test_budget_endpoint(client, db_session, monkeypatch):
     db_session.add(Cluster(name="c", context="ctx"))
     db_session.commit()

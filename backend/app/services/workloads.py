@@ -134,6 +134,18 @@ class WorkloadService:
         except KubernetesError as exc:
             raise WorkloadServiceError(str(exc)) from exc
 
+    def apply_documents(self, cluster_id, yaml_text, namespace):
+        try:
+            return self._client(cluster_id).apply_documents(yaml_text, namespace)
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    def diff_documents(self, cluster_id, yaml_text, namespace):
+        try:
+            return self._client(cluster_id).diff_documents(yaml_text, namespace)
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
     def scale_workload(self, cluster_id, kind, name, namespace, replicas):
         try:
             self._client(cluster_id).scale_workload(kind, name, namespace, replicas)

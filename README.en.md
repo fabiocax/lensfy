@@ -72,7 +72,10 @@ The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2
 - **YAML editor (Monaco)** to view/edit/apply any resource, with **Kubernetes autocomplete** and **diff**.
 - **Version history (up to 5)** per resource, recorded on every *Apply*: load a version, **diff against the editor**, or **diff between two versions**.
 - **Robust apply:** realigns `resourceVersion` to current state and retries on conflict (no intermittent save failures).
-- **Manifest deploy:** Monaco editor with templates, a **Builder** (form → YAML), **dry-run validation**, and drag-and-drop of YAML files/folders (multi-document).
+- **Manifest deploy:** Monaco editor with **15+ templates** (Deployment, StatefulSet, DaemonSet, HPA, PVC, NetworkPolicy, ServiceAccount…), a **Builder** (form → YAML), and drag-and-drop of YAML files/folders (multi-document). Namespace field with **autocomplete** from the cluster's namespaces, plus **copy/download/clear** buttons for the YAML.
+- **Idempotent apply (server-side apply):** creates *or updates* (like `kubectl apply --server-side`) — re-applying an existing resource no longer fails.
+- **Preview (diff):** server-side *dry-run* and a **field-level diff against live state** (like `kubectl diff`) before applying — shows what's new, what changes (current → new), and what stays the same.
+- **Dry-run validation:** validates each document's schema/admission without creating anything.
 
 ### Operations
 - **Workloads:** scale, *restart* (rollout), and delete.

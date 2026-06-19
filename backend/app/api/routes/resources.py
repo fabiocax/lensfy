@@ -242,6 +242,28 @@ def deploy_manifests(cluster_id: int, payload: DeployRequest, service: WorkloadS
     return DeployResponse(results=results)
 
 
+@router.post("/apply", response_model=DeployResponse)
+def apply_manifests(cluster_id: int, payload: DeployRequest, service: WorkloadServiceDep):
+    """Server-side apply (create-or-update) a (multi-document) YAML blob —
+    idempotent, like `kubectl apply --server-side`."""
+    try:
+        results = service.apply_documents(cluster_id, payload.yaml, payload.namespace)
+    except WorkloadServiceError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return DeployResponse(results=results)
+
+
+@router.post("/diff")
+def diff_manifests(cluster_id: int, payload: DeployRequest, service: WorkloadServiceDep):
+    """Preview changes (server-side dry-run apply + diff against live), like
+    `kubectl diff`. Returns per-document action and leaf-level changes."""
+    try:
+        results = service.diff_documents(cluster_id, payload.yaml, payload.namespace)
+    except WorkloadServiceError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return {"results": results}
+
+
 @router.put("/manifest", response_model=ManifestResponse)
 def apply_manifest(
     cluster_id: int,

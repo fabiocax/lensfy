@@ -4077,6 +4077,99 @@ spec:
               image: busybox
               command: ["sh", "-c", "date"]
 `,
+    statefulset: `apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: meu-sts
+spec:
+  serviceName: meu-sts
+  replicas: 1
+  selector:
+    matchLabels:
+      app: meu-sts
+  template:
+    metadata:
+      labels:
+        app: meu-sts
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: dados
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: dados
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+`,
+    daemonset: `apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: meu-daemon
+spec:
+  selector:
+    matchLabels:
+      app: meu-daemon
+  template:
+    metadata:
+      labels:
+        app: meu-daemon
+    spec:
+      containers:
+        - name: agent
+          image: busybox
+          command: ["sh", "-c", "sleep infinity"]
+`,
+    pvc: `apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: meu-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+`,
+    hpa: `apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: meu-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: meu-app
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+`,
+    serviceaccount: `apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: meu-sa
+`,
+    networkpolicy: `apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nega-tudo-ingress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+`,
   };
 
   let deployEditor = null;
@@ -4086,6 +4179,9 @@ spec:
     $('#deploy-results').innerHTML = '';
     $('#deploy-ns').value = state.selectedNs.length === 1 ? state.selectedNs[0] : 'default';
     $('#deploy-template').value = '';
+    // Datalist de namespaces do cluster (autocomplete no campo Namespace).
+    const dl = $('#deploy-ns-list');
+    if (dl) dl.innerHTML = (state.namespaces || []).map((n) => `<option value="${esc(n)}">`).join('');
     openModal('#deploy-modal');
     let monaco;
     try {
@@ -4214,14 +4310,19 @@ spec:
     if (!yamlText) return window.toast('Nada para aplicar', 'warning');
     $('#deploy-apply').disabled = true;
     try {
-      const data = await api(`/resources/deploy?cluster_id=${cur.id}`, {
+      const data = await api(`/resources/apply?cluster_id=${cur.id}`, {
         method: 'POST',
         body: JSON.stringify({ yaml: yamlText, namespace: $('#deploy-ns').value.trim() || 'default' }),
       });
       renderDeployResults(data.results);
-      const ok = data.results.filter((r) => r.status === 'created').length;
-      const err = data.results.length - ok;
-      window.toast(`${ok} criado(s)` + (err ? `, ${err} com erro` : ''), err ? 'warning' : 'success');
+      const created = data.results.filter((r) => r.status === 'created').length;
+      const configured = data.results.filter((r) => r.status === 'configured').length;
+      const err = data.results.length - created - configured;
+      const parts = [];
+      if (created) parts.push(`${created} criado(s)`);
+      if (configured) parts.push(`${configured} atualizado(s)`);
+      if (err) parts.push(`${err} com erro`);
+      window.toast(parts.join(', ') || 'nada aplicado', err ? 'warning' : 'success');
       renderView();
     } catch (e) {
       window.toast('Falha no deploy: ' + e.message, 'error');
@@ -4230,15 +4331,16 @@ spec:
     }
   }
 
+  const DEPLOY_STATUS_TAG = { valid: 'válido', created: 'criado', configured: 'atualizado' };
   function renderDeployResults(results) {
     $('#deploy-results').innerHTML =
       '<h4 style="margin:var(--space-4) 0 var(--space-2)">Resultado</h4>' +
       results
         .map((r) => {
-          const ok = r.status === 'created' || r.status === 'valid';
+          const ok = r.status !== 'error';
           const icon = ok ? 'fa-circle-check' : 'fa-circle-xmark';
           const color = ok ? 'var(--color-success)' : 'var(--color-danger)';
-          const tag = r.status === 'valid' ? ' (válido)' : '';
+          const tag = DEPLOY_STATUS_TAG[r.status] ? ` (${DEPLOY_STATUS_TAG[r.status]})` : '';
           return (
             `<div class="deploy-result"><i class="fas ${icon}" style="color:${color}"></i>` +
             `<span>${esc(r.kind)}/${esc(r.namespace || '')}/${esc(r.name)}${tag}</span>` +
@@ -4247,6 +4349,84 @@ spec:
           );
         })
         .join('');
+  }
+
+  // Prévia de deploy: dry-run server-side + diff contra o estado vivo (kubectl diff).
+  async function diffDeploy() {
+    const cur = current();
+    if (!cur) return window.toast('Selecione um cluster', 'warning');
+    const yamlText = (deployEditor ? deployEditor.getValue() : '').trim();
+    if (!yamlText) return window.toast('Nada para comparar', 'warning');
+    $('#deploy-diff').disabled = true;
+    $('#deploy-results').innerHTML =
+      '<div class="empty-state" style="height:100px"><div class="spinner"></div></div>';
+    try {
+      const data = await api(`/resources/diff?cluster_id=${cur.id}`, {
+        method: 'POST',
+        body: JSON.stringify({ yaml: yamlText, namespace: $('#deploy-ns').value.trim() || 'default' }),
+      });
+      renderDiffResults(data.results);
+    } catch (e) {
+      $('#deploy-results').innerHTML = '';
+      window.toast('Falha na prévia: ' + e.message, 'error');
+    } finally {
+      $('#deploy-diff').disabled = false;
+    }
+  }
+
+  const DIFF_ACTION = {
+    create: { label: 'novo', icon: 'fa-circle-plus', color: 'var(--color-success)' },
+    update: { label: 'altera', icon: 'fa-pen', color: 'var(--color-warning,#d6a700)' },
+    unchanged: { label: 'sem mudança', icon: 'fa-equals', color: 'var(--text-tertiary)' },
+    error: { label: 'erro', icon: 'fa-circle-xmark', color: 'var(--color-danger)' },
+  };
+  function renderDiffResults(results) {
+    const sections = results.map((r) => {
+      const a = DIFF_ACTION[r.action] || DIFF_ACTION.error;
+      const head =
+        `<div class="deploy-result"><i class="fas ${a.icon}" style="color:${a.color}"></i>` +
+        `<span>${esc(r.kind)}/${esc(r.namespace || '')}/${esc(r.name)} ` +
+        `<span class="badge">${a.label}</span></span>` +
+        (r.message ? `<span class="msg">${esc(r.message)}</span>` : '') + '</div>';
+      if (!r.changes || !r.changes.length) return head;
+      const rows = r.changes.map((c) =>
+        `<tr><td style="color:var(--text-secondary)">${esc(c.path)}</td>` +
+        `<td style="color:var(--color-danger)">${c.old == null ? '<i>—</i>' : esc(String(c.old))}</td>` +
+        `<td style="color:var(--color-success)">${c.new == null ? '<i>—</i>' : esc(String(c.new))}</td></tr>`
+      ).join('');
+      return head +
+        `<table class="data-table" style="margin:var(--space-1) 0 var(--space-3)">` +
+        `<thead><tr><th>Campo</th><th>Atual</th><th>Novo</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }).join('');
+    const changed = results.filter((r) => r.action === 'update' || r.action === 'create').length;
+    $('#deploy-results').innerHTML =
+      `<h4 style="margin:var(--space-4) 0 var(--space-2)">Prévia · ${changed} com mudança(s)</h4>${sections}`;
+  }
+
+  function clearDeploy() {
+    if (deployEditor) deployEditor.setValue('');
+    $('#deploy-results').innerHTML = '';
+  }
+  async function copyDeploy() {
+    const t = deployEditor ? deployEditor.getValue() : '';
+    if (!t.trim()) return window.toast('Editor vazio', 'warning');
+    try {
+      await navigator.clipboard.writeText(t);
+      window.toast('YAML copiado', 'success');
+    } catch (_) {
+      window.toast('Não foi possível copiar', 'error');
+    }
+  }
+  function downloadDeploy() {
+    const t = deployEditor ? deployEditor.getValue() : '';
+    if (!t.trim()) return window.toast('Editor vazio', 'warning');
+    const blob = new Blob([t], { type: 'application/yaml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'manifests.yaml';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   async function validateDeploy() {
@@ -5317,6 +5497,10 @@ spec:
     $('#btn-deploy').addEventListener('click', openDeploy);
     $('#deploy-apply').addEventListener('click', applyDeploy);
     $('#deploy-validate').addEventListener('click', validateDeploy);
+    $('#deploy-diff').addEventListener('click', diffDeploy);
+    $('#deploy-copy').addEventListener('click', copyDeploy);
+    $('#deploy-download').addEventListener('click', downloadDeploy);
+    $('#deploy-clear').addEventListener('click', clearDeploy);
     // Construtor de manifestos
     $('#btn-builder').addEventListener('click', () => {
       const panel = $('#deploy-builder');

@@ -72,7 +72,10 @@ Busca **reversa** de dependências — responde perguntas que a API do Kubernete
 - **Editor YAML (Monaco)** para ver/editar/aplicar qualquer recurso, com **autocomplete de Kubernetes** e **diff**.
 - **Histórico de versões (até 5)** por recurso, gravado a cada *Aplicar*: carregar uma versão, **diff contra o editor** ou **diff entre duas versões**.
 - **Apply robusto:** realinha o `resourceVersion` ao estado atual e repete em conflito (sem falhas intermitentes de save).
-- **Deploy de manifestos:** editor Monaco com templates, **Construtor** (formulário → YAML), **validação dry-run** e arrastar-e-soltar de arquivos/pastas YAML (multi-documento).
+- **Deploy de manifestos:** editor Monaco com **15+ templates** (Deployment, StatefulSet, DaemonSet, HPA, PVC, NetworkPolicy, ServiceAccount…), **Construtor** (formulário → YAML) e arrastar-e-soltar de arquivos/pastas YAML (multi-documento). Campo de namespace com **autocomplete** dos namespaces do cluster, e botões para **copiar/baixar/limpar** o YAML.
+- **Aplicar idempotente (server-side apply):** cria *ou atualiza* (como `kubectl apply --server-side`) — reaplicar um recurso existente não falha mais.
+- **Prévia (diff):** *dry-run* server-side e **diff campo a campo contra o estado vivo** (como `kubectl diff`) antes de aplicar — mostra o que é novo, o que muda (valor atual → novo) e o que fica igual.
+- **Validação dry-run:** valida schema/admission de cada documento sem criar nada.
 
 ### Operações
 - **Workloads:** escalar, *restart* (rollout) e excluir.

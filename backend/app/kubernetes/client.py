@@ -154,6 +154,69 @@ def _api_errors_msg(exceptions) -> str:
     return "; ".join(msgs)
 
 
+def _dyn_err_msg(exc) -> str:
+    """Human message from a dynamic-client / API error (body → summary → str)."""
+    body = getattr(exc, "body", None)
+    if body:
+        try:
+            return json.loads(body)["message"]
+        except Exception:  # noqa: BLE001
+            pass
+    return getattr(exc, "summary", None) or getattr(exc, "reason", None) or str(exc)
+
+
+# Server-managed metadata that only adds noise to a manifest diff.
+_DIFF_DROP_META = {
+    "managedFields", "resourceVersion", "uid", "generation",
+    "creationTimestamp", "selfLink",
+}
+
+
+def _clean_for_diff(obj: dict) -> dict:
+    """Strip server-owned fields (status, bookkeeping metadata, the
+    last-applied-configuration annotation) so a diff shows only intent."""
+    out = {k: v for k, v in obj.items() if k != "status"}
+    meta = out.get("metadata")
+    if isinstance(meta, dict):
+        meta = {k: v for k, v in meta.items() if k not in _DIFF_DROP_META}
+        ann = meta.get("annotations")
+        if isinstance(ann, dict):
+            ann = {k: v for k, v in ann.items()
+                   if k != "kubectl.kubernetes.io/last-applied-configuration"}
+            if ann:
+                meta["annotations"] = ann
+            else:
+                meta.pop("annotations", None)
+        out["metadata"] = meta
+    return out
+
+
+def _scalarize(v):
+    """Compact a value for diff display (lists/dicts → short JSON)."""
+    if isinstance(v, (dict, list)):
+        s = json.dumps(v, ensure_ascii=False, default=str, sort_keys=True)
+        return s if len(s) <= 200 else s[:200] + "…"
+    return v
+
+
+def _diff_dicts(old, new, path: str = "") -> list[dict]:
+    """Flat list of changed leaf paths between two nested values: each entry is
+    ``{path, old, new}``. Mismatched types/lists compare by value (shown whole)."""
+    changes: list[dict] = []
+    if isinstance(old, dict) and isinstance(new, dict):
+        for key in sorted(set(old) | set(new)):
+            sub = f"{path}.{key}" if path else key
+            if key not in old:
+                changes.append({"path": sub, "old": None, "new": _scalarize(new[key])})
+            elif key not in new:
+                changes.append({"path": sub, "old": _scalarize(old[key]), "new": None})
+            else:
+                changes.extend(_diff_dicts(old[key], new[key], sub))
+    elif old != new:
+        changes.append({"path": path, "old": _scalarize(old), "new": _scalarize(new)})
+    return changes
+
+
 @dataclass(frozen=True)
 class ContextInfo:
     name: str
@@ -1463,6 +1526,103 @@ class KubernetesClient:
                 results.append({**entry, "status": "error", "message": _api_errors_msg([exc])})
             except Exception as exc:  # noqa: BLE001
                 results.append({**entry, "status": "error", "message": str(exc)})
+        return results
+
+    def _parse_docs(self, yaml_text: str) -> list[dict]:
+        try:
+            docs = [d for d in yaml.safe_load_all(yaml_text) if isinstance(d, dict)]
+        except yaml.YAMLError as exc:
+            raise KubernetesError(f"YAML inválido: {exc}") from exc
+        if not docs:
+            raise KubernetesError("Nenhum documento YAML válido encontrado")
+        return docs
+
+    def apply_documents(
+        self, yaml_text: str, default_namespace: str = "default",
+        field_manager: str = "lensfy",
+    ) -> list[dict]:
+        """Server-side apply each document — create-or-update, like
+        ``kubectl apply --server-side --force-conflicts``. Unlike
+        :meth:`deploy_manifests` (create-only), re-applying an existing resource
+        updates it. Returns per-document status: created | configured | error.
+        """
+        from kubernetes.dynamic.exceptions import NotFoundError
+
+        results: list[dict] = []
+        for doc in self._parse_docs(yaml_text):
+            meta = doc.get("metadata") or {}
+            entry = {
+                "kind": doc.get("kind", "?"), "name": meta.get("name", "?"),
+                "namespace": meta.get("namespace") or default_namespace,
+            }
+            if not doc.get("apiVersion") or not doc.get("kind") or not meta.get("name"):
+                results.append({**entry, "status": "error", "message": "apiVersion/kind/name ausente"})
+                continue
+            try:
+                res = self._dyn().resources.get(
+                    api_version=doc["apiVersion"], kind=doc["kind"]
+                )
+                ns = entry["namespace"] if res.namespaced else None
+                existed = True
+                try:
+                    res.get(name=entry["name"], namespace=ns)
+                except NotFoundError:
+                    existed = False
+                self._dyn().server_side_apply(
+                    res, body=doc, name=entry["name"], namespace=ns,
+                    field_manager=field_manager, force_conflicts=True,
+                )
+                results.append({**entry, "status": "configured" if existed else "created"})
+            except Exception as exc:  # noqa: BLE001
+                results.append({**entry, "status": "error", "message": _dyn_err_msg(exc)})
+        return results
+
+    def diff_documents(
+        self, yaml_text: str, default_namespace: str = "default",
+        field_manager: str = "lensfy",
+    ) -> list[dict]:
+        """Preview a deploy: server-side **dry-run** apply each document and diff
+        the merged result against the live object (like ``kubectl diff``).
+
+        Returns per-document ``{kind, name, namespace, action, changes}`` where
+        action is create | update | unchanged | error and changes is a list of
+        ``{path, old, new}`` leaf differences (bounded).
+        """
+        from kubernetes.dynamic.exceptions import NotFoundError
+
+        results: list[dict] = []
+        for doc in self._parse_docs(yaml_text):
+            meta = doc.get("metadata") or {}
+            entry = {
+                "kind": doc.get("kind", "?"), "name": meta.get("name", "?"),
+                "namespace": meta.get("namespace") or default_namespace,
+            }
+            if not doc.get("apiVersion") or not doc.get("kind") or not meta.get("name"):
+                results.append({**entry, "action": "error", "message": "apiVersion/kind/name ausente"})
+                continue
+            try:
+                res = self._dyn().resources.get(
+                    api_version=doc["apiVersion"], kind=doc["kind"]
+                )
+                ns = entry["namespace"] if res.namespaced else None
+                try:
+                    live = res.get(name=entry["name"], namespace=ns).to_dict()
+                except NotFoundError:
+                    live = None
+                if live is None:
+                    results.append({**entry, "action": "create", "changes": []})
+                    continue
+                merged = self._dyn().server_side_apply(
+                    res, body=doc, name=entry["name"], namespace=ns,
+                    field_manager=field_manager, force_conflicts=True, dry_run="All",
+                ).to_dict()
+                changes = _diff_dicts(_clean_for_diff(live), _clean_for_diff(merged))
+                results.append({
+                    **entry, "action": "update" if changes else "unchanged",
+                    "changes": changes[:200],
+                })
+            except Exception as exc:  # noqa: BLE001
+                results.append({**entry, "action": "error", "message": _dyn_err_msg(exc)})
         return results
 
     # --- node shell (privileged pod + nsenter into the host) -------------
