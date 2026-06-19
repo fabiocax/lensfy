@@ -841,14 +841,47 @@
   }
 
   // ---------- tree ----------
+  // Grupos da árvore são recolhíveis e começam FECHADOS; os que o usuário abre
+  // ficam memorizados (localStorage), persistindo entre recargas.
+  function expandedGroups() {
+    if (!state._treeExpanded) {
+      try {
+        state._treeExpanded = new Set(JSON.parse(localStorage.getItem('lensfy.tree.expanded') || '[]'));
+      } catch (_) {
+        state._treeExpanded = new Set();
+      }
+    }
+    return state._treeExpanded;
+  }
+  function toggleTreeGroup(key) {
+    const exp = expandedGroups();
+    if (exp.has(key)) exp.delete(key);
+    else exp.add(key);
+    try {
+      localStorage.setItem('lensfy.tree.expanded', JSON.stringify([...exp]));
+    } catch (_) {}
+  }
+
   function renderTree() {
     const tree = $('#resource-tree');
     tree.innerHTML = '';
     const hasCluster = !!current();
-    const addGroup = (title, items, extraTitle) => {
-      const t = el(`<div class="tree-group-title">${esc(title)}</div>`);
-      if (extraTitle) t.title = extraTitle;
-      tree.appendChild(t);
+    const exp = expandedGroups();
+    const addGroup = (key, title, items, extraTitle) => {
+      const open = exp.has(key);
+      const head = el(
+        `<div class="tree-group-title ${open ? '' : 'collapsed'}">` +
+          `<i class="fas fa-chevron-down tree-caret"></i>` +
+          `<span class="tree-grp-label">${esc(title)}</span>` +
+          `<span class="tree-grp-count">${items.length}</span></div>`
+      );
+      if (extraTitle) head.title = extraTitle;
+      head.addEventListener('click', () => {
+        toggleTreeGroup(key);
+        renderTree();
+      });
+      tree.appendChild(head);
+      if (!open) return;
       items.forEach((it) => {
         const disabled = !hasCluster;
         const node = el(
@@ -866,9 +899,9 @@
         tree.appendChild(node);
       });
     };
-    TREE.forEach((grp) => addGroup(grp.group, grp.items));
+    TREE.forEach((grp) => addGroup(grp.group, grp.group, grp.items));
     // Grupos descobertos dinamicamente (CRDs e tipos não-curados do cluster).
-    (state.discovered || []).forEach((grp) => addGroup(grp.label, grp.items, grp.group));
+    (state.discovered || []).forEach((grp) => addGroup('dyn:' + grp.group, grp.label, grp.items, grp.group));
   }
 
   // Kinds já cobertos pela árvore curada (com views dedicadas) — não duplicar.
@@ -2030,25 +2063,15 @@
     $('#view-body').innerHTML =
       `<div class="dash-card"><h3 style="margin:0 0 var(--space-2)"><i class="fas fa-cube"></i> ${esc(crd.kind)} <span class="log-count">(${rows.length})</span></h3>` +
       `<table class="data-table"><thead><tr><th>Nome</th>${namespaced ? '<th>Namespace</th>' : ''}<th>Idade</th></tr></thead><tbody>${body}</tbody></table></div>`;
+    // Reusa o editor unificado (ver/editar/salvar) por apiVersion+kind.
     $('#view-body').querySelectorAll('tr[data-name]').forEach((tr) =>
-      tr.addEventListener('click', () => openCRDYaml(cur, crd, tr.dataset.name, tr.dataset.ns || '')));
-  }
-  function openCRDYaml(cur, crd, name, ns) {
-    uiModal({
-      title: `${crd.kind}: ${name}`, icon: 'fa-file-code', width: 'min(820px,96vw)',
-      body: '<div id="crd-yaml" style="max-height:60vh;overflow:auto"><div class="empty-state" style="height:120px"><div class="spinner"></div></div></div>',
-      actions: [{ label: 'Fechar', cls: 'btn-primary', primary: true, value: 'ok' }],
-      onOpen: async (bd) => {
-        const box = bd.querySelector('#crd-yaml');
-        const q = `cluster_id=${cur.id}&group=${encodeURIComponent(crd.group)}&version=${encodeURIComponent(crd.version)}&plural=${encodeURIComponent(crd.plural)}&name=${encodeURIComponent(name)}` + (ns ? `&namespace=${encodeURIComponent(ns)}` : '');
-        try {
-          const r = await api(`/crds/manifest?${q}`);
-          box.innerHTML = `<pre style="margin:0;white-space:pre;font-size:12px;line-height:1.5">${esc(r.yaml)}</pre>`;
-        } catch (e) {
-          box.innerHTML = `<p style="color:var(--color-danger)">${esc(e.message)}</p>`;
-        }
-      },
-    });
+      tr.addEventListener('click', () => {
+        const apiVersion = crd.group ? `${crd.group}/${crd.version}` : crd.version;
+        openDynamicYaml(
+          cur, { apiVersion, kind: crd.kind, namespaced: crd.scope === 'Namespaced' },
+          tr.dataset.name, tr.dataset.ns || ''
+        );
+      }));
   }
 
   // ---------- recursos descobertos dinamicamente (Gateway, VirtualService…) ----------
@@ -2085,22 +2108,72 @@
     $('#view-body').querySelectorAll('tr[data-name]').forEach((tr) =>
       tr.addEventListener('click', () => openDynamicYaml(cur, desc, tr.dataset.name, tr.dataset.ns || '')));
   }
+  // Visualiza E edita um recurso descoberto: editor Monaco + Salvar (server-side
+  // apply, que funciona para qualquer apiVersion/kind, inclusive CRDs).
   function openDynamicYaml(cur, desc, name, ns) {
+    let editor = null;
+    const disposeEd = () => { try { editor && editor.dispose(); } catch (_) {} editor = null; };
     uiModal({
-      title: `${desc.kind}: ${name}`, icon: 'fa-file-code', width: 'min(820px,96vw)',
-      body: '<div id="dyn-yaml" style="max-height:60vh;overflow:auto"><div class="empty-state" style="height:120px"><div class="spinner"></div></div></div>',
-      actions: [{ label: 'Fechar', cls: 'btn-primary', primary: true, value: 'ok' }],
-      onOpen: async (bd) => {
+      title: `${desc.kind}: ${name}`, icon: 'fa-file-code', width: 'min(960px,96vw)',
+      body:
+        '<div id="dyn-yaml" style="height:60vh;border:1px solid var(--border-color);border-radius:var(--radius-md);overflow:hidden">' +
+        '<div class="empty-state" style="height:100%"><div class="spinner"></div></div></div>' +
+        '<div id="dyn-yaml-status" style="margin-top:8px;min-height:18px;font-size:var(--font-size-sm);color:var(--text-tertiary)"></div>',
+      actions: [
+        { label: 'Fechar', onClick: () => { disposeEd(); return 'close'; } },
+        {
+          label: '<i class="fas fa-rocket"></i> Salvar', cls: 'btn-primary', primary: true,
+          onClick: (bd) => { if (bd._dynSave) bd._dynSave(); /* undefined: mantém aberto */ },
+        },
+      ],
+      onOpen: async (bd, done) => {
         const box = bd.querySelector('#dyn-yaml');
+        const status = bd.querySelector('#dyn-yaml-status');
         const q = `cluster_id=${cur.id}&apiVersion=${encodeURIComponent(desc.apiVersion)}` +
           `&kind=${encodeURIComponent(desc.kind)}&name=${encodeURIComponent(name)}` +
           (ns ? `&namespace=${encodeURIComponent(ns)}` : '');
+        let yamlText;
         try {
-          const r = await api(`/discovery/manifest?${q}`);
-          box.innerHTML = `<pre style="margin:0;white-space:pre;font-size:12px;line-height:1.5">${esc(r.yaml)}</pre>`;
+          yamlText = (await api(`/discovery/manifest?${q}`)).yaml;
         } catch (e) {
-          box.innerHTML = `<p style="color:var(--color-danger)">${esc(e.message)}</p>`;
+          box.innerHTML = `<p style="color:var(--color-danger);padding:var(--space-3)">${esc(e.message)}</p>`;
+          return;
         }
+        let monaco;
+        try {
+          monaco = await ensureMonaco();
+        } catch (e) {
+          box.innerHTML = `<p style="color:var(--color-danger);padding:var(--space-3)">Editor indisponível: ${esc(e.message)}</p>`;
+          return;
+        }
+        box.innerHTML = '';
+        editor = monaco.editor.create(box, {
+          value: yamlText, language: 'yaml', theme: 'vs-dark', automaticLayout: true,
+          minimap: { enabled: false }, fontSize: 13, tabSize: 2, scrollBeyondLastLine: false,
+        });
+        bd._dynSave = async () => {
+          if (!editor) return;
+          const text = editor.getValue().trim();
+          if (!text) return window.toast('Nada para salvar', 'warning');
+          status.innerHTML = '<span class="status-dot unknown"></span> salvando…';
+          try {
+            const r = await api(`/resources/apply?cluster_id=${cur.id}`, {
+              method: 'POST',
+              body: JSON.stringify({ yaml: text, namespace: ns || 'default' }),
+            });
+            const bad = (r.results || []).find((x) => x.status === 'error');
+            if (bad) {
+              status.innerHTML = `<span style="color:var(--color-danger)"><i class="fas fa-circle-xmark"></i> ${esc(bad.message || 'erro ao aplicar')}</span>`;
+              return;
+            }
+            window.toast(`${desc.kind} ${name} salvo`, 'success');
+            disposeEd();
+            done('saved');
+            renderView(); // reflete a alteração na lista
+          } catch (e) {
+            status.innerHTML = `<span style="color:var(--color-danger)"><i class="fas fa-circle-xmark"></i> ${esc(e.message)}</span>`;
+          }
+        };
       },
     });
   }

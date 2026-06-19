@@ -38,7 +38,9 @@ A interface é um **PWA instalável**, servida pelo próprio backend (FastAPI + 
 
 ### Explorer de recursos
 - Árvore com **Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services, Ingress, NetworkPolicies, ConfigMaps, Secrets, PVC, StorageClasses, Namespaces, Nodes, Events, RBAC** (roles/bindings), **LimitRanges** e **ResourceQuotas**.
-- **Descoberta automática de recursos:** a árvore lateral lista **todos os tipos de recurso servidos pelo cluster** (não só os fixos) via *API discovery* — qualquer CRD instalado (Istio **Gateway/VirtualService**, **Gateway API** HTTPRoute, cert-manager, ArgoCD, Prometheus Operator…) aparece sozinho, agrupado por API group, com listagem de instâncias e YAML. Os tipos já cobertos pelas views dedicadas não são duplicados.
+- **Descoberta automática de recursos:** a árvore lateral lista **todos os tipos de recurso servidos pelo cluster** (não só os fixos) via *API discovery* — qualquer CRD instalado (Istio **Gateway/VirtualService**, **Gateway API** HTTPRoute, cert-manager, ArgoCD, Prometheus Operator…) aparece sozinho, agrupado por API group, com listagem de instâncias. Os tipos já cobertos pelas views dedicadas não são duplicados.
+- **Editar e salvar qualquer recurso descoberto:** clicar numa instância abre um editor **Monaco** (com autocomplete) e o botão **Salvar** aplica via *server-side apply* — funciona para qualquer `apiVersion/kind`, inclusive CRDs.
+- **Árvore recolhível:** os grupos da árvore abrem/fecham e começam **fechados** por padrão; os que você abre ficam memorizados entre recargas.
 - **CRDs / Custom Resources:** view dedicada que lista as CRDs instaladas (grupo, kind, escopo, versões) com drill-down nas instâncias.
 - **Tabelas ao vivo** (`/ws/watch`): criação/remoção de pods, status e restarts se atualizam sozinhos — reconciliação incremental **sem flicker** (seleção e scroll preservados).
 - **Filtro global de namespace** multi-seleção (estilo Lens) e **busca global / command palette** (foco com `/`).

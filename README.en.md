@@ -38,7 +38,9 @@ The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2
 
 ### Resource explorer
 - A tree with **Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services, Ingress, NetworkPolicies, ConfigMaps, Secrets, PVC, StorageClasses, Namespaces, Nodes, Events, RBAC** (roles/bindings), **LimitRanges**, and **ResourceQuotas**.
-- **Automatic resource discovery:** the sidebar lists **every resource type the cluster serves** (not just a fixed set) via *API discovery* — any installed CRD (Istio **Gateway/VirtualService**, **Gateway API** HTTPRoute, cert-manager, ArgoCD, Prometheus Operator…) shows up on its own, grouped by API group, with instance listing and YAML. Types already covered by dedicated views aren't duplicated.
+- **Automatic resource discovery:** the sidebar lists **every resource type the cluster serves** (not just a fixed set) via *API discovery* — any installed CRD (Istio **Gateway/VirtualService**, **Gateway API** HTTPRoute, cert-manager, ArgoCD, Prometheus Operator…) shows up on its own, grouped by API group, with instance listing. Types already covered by dedicated views aren't duplicated.
+- **Edit and save any discovered resource:** clicking an instance opens a **Monaco** editor (with autocomplete) and the **Save** button applies it via *server-side apply* — works for any `apiVersion/kind`, including CRDs.
+- **Collapsible tree:** the sidebar groups expand/collapse and start **collapsed** by default; the ones you open are remembered across reloads.
 - **CRDs / Custom Resources:** a dedicated view listing installed CRDs (group, kind, scope, versions) with drill-down into instances.
 - **Live tables** (`/ws/watch`): pod creation/removal, status, and restarts update on their own — incremental reconciliation **without flicker** (selection and scroll preserved).
 - **Global namespace filter** with multi-select (Lens-style) and a **global search / command palette** (focus with `/`).
