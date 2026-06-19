@@ -7,6 +7,7 @@ from app.api.routes import (
     crds,
     deployments,
     helm,
+    impact,
     logs,
     metrics,
     multicluster,
@@ -33,6 +34,7 @@ api_router.include_router(helm.router, prefix="/helm", tags=["helm"])
 api_router.include_router(security.router, prefix="/security", tags=["security"])
 api_router.include_router(crds.router, prefix="/crds", tags=["crds"])
 api_router.include_router(capacity.router, prefix="/capacity", tags=["capacity"])
+api_router.include_router(impact.router, prefix="/impact", tags=["impact"])
 api_router.include_router(
     multicluster.router, prefix="/multicluster", tags=["multicluster"]
 )

@@ -429,3 +429,98 @@ def test_inventory_endpoint(client, db_session, monkeypatch):
 
 def test_inventory_unknown_cluster_404(client, db_session):
     assert client.get("/api/multicluster/inventory?cluster_id=999").status_code == 404
+
+
+# --------------------------- impact / blast radius (unit) -------------------
+
+def _pod(name, ns, node=None, owner=None, volumes=None, containers=None):
+    return NS(
+        metadata=NS(name=name, namespace=ns, owner_references=owner or []),
+        status=NS(phase="Running"),
+        spec=NS(node_name=node, volumes=volumes or [], image_pull_secrets=[],
+                init_containers=[], containers=containers or [NS(env_from=[], env=[])]),
+    )
+
+
+def test_impact_configmap_finds_consumers():
+    # pod-a mounts cfg as a volume; pod-b uses it via envFrom; pod-c ignores it.
+    rs_owner = [NS(kind="ReplicaSet", name="web-abc")]
+    pod_a = _pod("web-abc-1", "default", owner=rs_owner,
+                 volumes=[NS(config_map=NS(name="cfg"), secret=None,
+                             persistent_volume_claim=None, projected=None)],
+                 containers=[NS(env_from=[], env=[])])
+    pod_b = _pod("job-x", "default",
+                 containers=[NS(env_from=[NS(config_map_ref=NS(name="cfg"), secret_ref=None)], env=[])])
+    pod_c = _pod("other", "default",
+                 volumes=[NS(config_map=NS(name="outra"), secret=None,
+                             persistent_volume_claim=None, projected=None)],
+                 containers=[NS(env_from=[], env=[])])
+    rs = NS(metadata=NS(namespace="default", name="web-abc",
+                        owner_references=[NS(kind="Deployment", name="web")]))
+
+    kc = _bare_client(
+        _core=NS(list_namespaced_pod=lambda ns: NS(items=[pod_a, pod_b, pod_c])),
+        _apps=NS(list_namespaced_replica_set=lambda ns: NS(items=[rs])),
+    )
+    out = kc.impact("configmaps", "cfg", "default")
+
+    assert out["summary"]["pods"] == 2  # pod_c excluded
+    wls = {(w["kind"], w["name"]): w for w in out["workloads"]}
+    assert ("Deployment", "web") in wls   # pod_a collapsed onto its Deployment
+    assert "volume" in wls[("Deployment", "web")]["via"]
+    assert ("Pod", "job-x") in wls and "envFrom" in wls[("Pod", "job-x")]["via"]
+
+
+def test_impact_node_flags_spof():
+    # web has 2 desired replicas, both on this node -> SPOF; api has 1 of 3 here.
+    p1 = _pod("web-1", "default", node="n1",
+              owner=[NS(kind="ReplicaSet", name="web-rs")])
+    p2 = _pod("web-2", "default", node="n1",
+              owner=[NS(kind="ReplicaSet", name="web-rs")])
+    p3 = _pod("api-1", "default", node="n1",
+              owner=[NS(kind="ReplicaSet", name="api-rs")])
+    rss = [
+        NS(metadata=NS(namespace="default", name="web-rs",
+                       owner_references=[NS(kind="Deployment", name="web")])),
+        NS(metadata=NS(namespace="default", name="api-rs",
+                       owner_references=[NS(kind="Deployment", name="api")])),
+    ]
+    deps = [
+        NS(metadata=NS(namespace="default", name="web"), spec=NS(replicas=2)),
+        NS(metadata=NS(namespace="default", name="api"), spec=NS(replicas=3)),
+    ]
+    kc = _bare_client(
+        _core=NS(list_pod_for_all_namespaces=lambda field_selector=None: NS(items=[p1, p2, p3])),
+        _apps=NS(
+            list_replica_set_for_all_namespaces=lambda: NS(items=rss),
+            list_deployment_for_all_namespaces=lambda: NS(items=deps),
+            list_stateful_set_for_all_namespaces=lambda: NS(items=[]),
+        ),
+    )
+    out = kc.impact("nodes", "n1")
+
+    assert out["summary"]["pods"] == 3
+    spof_names = {s["name"] for s in out["spof"]}
+    assert spof_names == {"web"}        # all of web's replicas are here
+    assert out["summary"]["spof"] == 1
+
+
+def test_impact_endpoint_and_unsupported_kind(client, db_session, monkeypatch):
+    db_session.add(Cluster(name="c", context="ctx"))
+    db_session.commit()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def impact(self, kind, name, namespace):
+            return {"target": {"kind": kind, "name": name, "namespace": namespace},
+                    "consumers": [], "workloads": [{"kind": "Deployment", "name": "web",
+                    "namespace": namespace, "pods": 1, "via": ["volume"]}],
+                    "summary": {"pods": 1, "workloads": 1}}
+
+    monkeypatch.setattr(workloads_service, "get_client", lambda *a, **k: FakeClient())
+    ok = client.get("/api/impact?cluster_id=1&kind=configmaps&name=cfg&namespace=default")
+    assert ok.status_code == 200 and ok.json()["workloads"][0]["name"] == "web"
+    # unsupported kind rejected before hitting the cluster
+    assert client.get("/api/impact?cluster_id=1&kind=pods&name=p").status_code == 404

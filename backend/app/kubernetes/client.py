@@ -1989,6 +1989,157 @@ class KubernetesClient:
         key = f"rightsize:{namespace or '*'}"
         return self._cached(key, 8.0, lambda: self._guard("rightsizing", _do))
 
+    # --- impact / blast radius (busca reversa de dependências) -----------
+
+    def impact(self, kind: str, name: str, namespace: str | None = None) -> dict:
+        """Reverse-dependency / blast-radius analysis for a resource.
+
+        Answers "where is this used?" / "what breaks if this goes?" — questions
+        the live API can't answer directly:
+
+        * **configmaps / secrets / pvc**: which pods reference it and how
+          (volume, projected volume, ``envFrom``, ``env``, ``imagePullSecret``),
+          aggregated by owning workload.
+        * **nodes**: which pods/workloads run on it, plus single-point-of-failure
+          flags (workloads whose every replica sits on this node) and a drain
+          impact summary.
+        """
+        kind = kind.lower()
+
+        def _do():
+            if kind == "nodes":
+                pods = self._core.list_pod_for_all_namespaces(
+                    field_selector=f"spec.nodeName={name}"
+                ).items
+                rs_ns = None
+            elif kind in ("configmaps", "secrets", "pvc"):
+                if not namespace:
+                    raise KubernetesError(f"{kind} exige namespace para análise de impacto")
+                pods = self._core.list_namespaced_pod(namespace).items
+                rs_ns = namespace
+            else:
+                raise KubernetesError(f"análise de impacto não suportada para {kind}")
+
+            # ReplicaSet -> owning Deployment (to collapse pods onto the Deployment).
+            rss = (self._apps.list_namespaced_replica_set(rs_ns).items if rs_ns
+                   else self._apps.list_replica_set_for_all_namespaces().items)
+            rs_owner = {}
+            for rs in rss:
+                for o in (rs.metadata.owner_references or []):
+                    if o.kind == "Deployment":
+                        rs_owner[(rs.metadata.namespace, rs.metadata.name)] = o.name
+
+            def workload_of(p):
+                for o in (p.metadata.owner_references or []):
+                    if o.kind == "ReplicaSet":
+                        dep = rs_owner.get((p.metadata.namespace, o.name))
+                        return ("Deployment", dep) if dep else ("ReplicaSet", o.name)
+                    if o.kind in ("StatefulSet", "DaemonSet", "Job"):
+                        return (o.kind, o.name)
+                return None
+
+            def refs_of(p):
+                """How pod ``p`` references the target (empty list = no reference)."""
+                spec = p.spec
+                refs: set[str] = set()
+                if kind == "pvc":
+                    for v in (spec.volumes or []):
+                        if v.persistent_volume_claim and v.persistent_volume_claim.claim_name == name:
+                            refs.add("volume")
+                    return sorted(refs)
+                is_cm = kind == "configmaps"
+                for v in (spec.volumes or []):
+                    if is_cm and v.config_map and v.config_map.name == name:
+                        refs.add("volume")
+                    if not is_cm and v.secret and v.secret.secret_name == name:
+                        refs.add("volume")
+                    proj = v.projected
+                    if proj:
+                        for s in (proj.sources or []):
+                            if is_cm and s.config_map and s.config_map.name == name:
+                                refs.add("volume projetado")
+                            if not is_cm and s.secret and s.secret.name == name:
+                                refs.add("volume projetado")
+                if not is_cm:
+                    for ips in (spec.image_pull_secrets or []):
+                        if ips.name == name:
+                            refs.add("imagePullSecret")
+                for c in (spec.containers or []) + (spec.init_containers or []):
+                    for ef in (c.env_from or []):
+                        if is_cm and ef.config_map_ref and ef.config_map_ref.name == name:
+                            refs.add("envFrom")
+                        if not is_cm and ef.secret_ref and ef.secret_ref.name == name:
+                            refs.add("envFrom")
+                    for e in (c.env or []):
+                        vf = e.value_from
+                        if not vf:
+                            continue
+                        if is_cm and vf.config_map_key_ref and vf.config_map_key_ref.name == name:
+                            refs.add("env")
+                        if not is_cm and vf.secret_key_ref and vf.secret_key_ref.name == name:
+                            refs.add("env")
+                return sorted(refs)
+
+            consumers = []
+            for p in pods:
+                refs = ["agendado"] if kind == "nodes" else refs_of(p)
+                if not refs:
+                    continue
+                wl = workload_of(p)
+                consumers.append({
+                    "pod": p.metadata.name, "namespace": p.metadata.namespace,
+                    "node": p.spec.node_name,
+                    "workload_kind": wl[0] if wl else None,
+                    "workload": wl[1] if wl else None,
+                    "phase": (p.status.phase if p.status else None),
+                    "refs": refs,
+                })
+
+            # Aggregate consumers by owning workload (standalone pods stay as Pod).
+            agg: dict[tuple, dict] = {}
+            for c in consumers:
+                wlk = c["workload_kind"] or "Pod"
+                wln = c["workload"] or c["pod"]
+                a = agg.setdefault((wlk, wln, c["namespace"]), {
+                    "kind": wlk, "name": wln, "namespace": c["namespace"],
+                    "pods": 0, "via": set(),
+                })
+                a["pods"] += 1
+                a["via"].update(c["refs"])
+            workloads = [
+                {"kind": a["kind"], "name": a["name"], "namespace": a["namespace"],
+                 "pods": a["pods"], "via": sorted(a["via"])}
+                for a in agg.values()
+            ]
+            workloads.sort(key=lambda w: (w["kind"], w["namespace"] or "", w["name"]))
+
+            result = {
+                "target": {"kind": kind, "name": name, "namespace": namespace},
+                "consumers": consumers,
+                "workloads": workloads,
+                "summary": {"pods": len(consumers), "workloads": len(workloads)},
+            }
+
+            if kind == "nodes":
+                # SPOF: a Deployment/StatefulSet whose every desired replica is on
+                # this node loses all of them if the node dies/drains.
+                desired: dict[tuple, int] = {}
+                for d in self._apps.list_deployment_for_all_namespaces().items:
+                    desired[("Deployment", d.metadata.namespace, d.metadata.name)] = d.spec.replicas or 0
+                for s in self._apps.list_stateful_set_for_all_namespaces().items:
+                    desired[("StatefulSet", s.metadata.namespace, s.metadata.name)] = s.spec.replicas or 0
+                spof = []
+                for w in workloads:
+                    rep = desired.get((w["kind"], w["namespace"], w["name"]))
+                    if rep and rep > 0 and w["pods"] >= rep:
+                        spof.append({**w, "replicas": rep})
+                result["spof"] = spof
+                result["summary"]["spof"] = len(spof)
+            return result
+
+        key = f"impact:{kind}:{namespace or ''}:{name}"
+        return self._cached(key, 8.0, lambda: self._guard("impact analysis", _do))
+
     # --- helpers ----------------------------------------------------------
 
     @staticmethod

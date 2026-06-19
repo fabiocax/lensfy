@@ -164,6 +164,19 @@ TOOLS: list[dict] = [
         "description": "Lista as CustomResourceDefinitions instaladas (ArgoCD, cert-manager, Istio, …) com grupo, kind, escopo e versões.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "impact",
+        "description": "Análise de impacto / blast radius (busca reversa de dependências). Para configmaps/secrets/pvc: quais pods/workloads consomem o recurso e como (volume, envFrom, env, imagePullSecret). Para nodes: quais workloads rodam no nó e quais são SPOF (todas as réplicas no mesmo nó). Use para responder 'onde é usado?' e 'o que quebra se isto cair?'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["nodes", "configmaps", "secrets", "pvc"]},
+                "name": {"type": "string"},
+                "namespace": {"type": "string", "description": "obrigatório para configmaps/secrets/pvc"},
+            },
+            "required": ["kind", "name"],
+        },
+    },
     # --- mutating ---
     {
         "name": "cordon_node",
@@ -330,6 +343,8 @@ def tool_summary(name: str, inp: dict) -> str:
         return "Recomendações de rightsizing" + (f" em {ns}" if ns else "")
     if name == "list_crds":
         return "Listar CRDs instalados"
+    if name == "impact":
+        return f"Análise de impacto de {inp.get('kind')}/{inp.get('name', '')}{loc}"
     return name
 
 
@@ -389,6 +404,8 @@ def execute_tool(client: KubernetesClient, name: str, inp: dict) -> str:
         return _clip(client.rightsizing(inp.get("namespace")))
     if name == "list_crds":
         return _clip(client.list_crds())
+    if name == "impact":
+        return _clip(client.impact(inp["kind"], inp["name"], inp.get("namespace")))
     # --- mutating ---
     if name == "cordon_node":
         client.cordon_node(inp["name"], bool(inp.get("unschedulable", True)))

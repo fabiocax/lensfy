@@ -57,6 +57,12 @@ A interface é um **PWA instalável**, servida pelo próprio backend (FastAPI + 
 - **"Quem pode o quê":** agrega todo sujeito RBAC (User/Group/ServiceAccount) e os verbos/recursos concedidos pelos roles vinculados, sinalizando **cluster-admins**.
 - **Simulador `can-i`:** checagem autoritativa de permissão (SubjectAccessReview) para a credencial atual ou um ServiceAccount/usuário específico.
 
+### Análise de impacto (blast radius) ⭐
+Busca **reversa** de dependências — responde perguntas que a API do Kubernetes não responde direto:
+- **"Onde esse ConfigMap/Secret/PVC é usado?"** — lista os pods que o consomem **e como** (volume, volume projetado, `envFrom`, `env`, `imagePullSecret`), agregado por workload.
+- **"O que quebra se eu drenar este nó?"** — raio de impacto de um **Node**: pods/workloads que rodam nele e detecção de **SPOF** (workloads cujas réplicas estão **todas** no mesmo nó).
+- Cada resultado é clicável e abre o recurso no painel de detalhes. Também disponível como ferramenta do assistente de IA.
+
 ### Tempo real (terminal, logs, console)
 - **Logs ao vivo:** filtro, auto-scroll, copiar, baixar e seletor de container.
 - **Terminal/console (xterm.js):** `exec` em pod (PTY), **shell de nó** (estilo Lens, via pod privilegiado + `nsenter`) e **shell `kubectl`** já no contexto do cluster.
@@ -78,7 +84,7 @@ A interface é um **PWA instalável**, servida pelo próprio backend (FastAPI + 
 - **Helm:** releases, install/upgrade/rollback e uninstall.
 
 ### Assistente de IA (opcional)
-- Agente SRE sobre a **Claude API** (Messages API, via `httpx` — sem SDK extra): ferramentas **read-only** (visão geral, listar/ver recursos, logs, top, **varredura de segurança, RBAC `can-i`, capacidade, rightsizing e CRDs**) rodam automaticamente; **ações que alteram o cluster** (escalar/restart/excluir/cordon/drain/rollback/cronjob) exigem **Aprovar/Negar** na UI.
+- Agente SRE sobre a **Claude API** (Messages API, via `httpx` — sem SDK extra): ferramentas **read-only** (visão geral, listar/ver recursos, logs, top, **varredura de segurança, RBAC `can-i`, capacidade, rightsizing, CRDs e análise de impacto**) rodam automaticamente; **ações que alteram o cluster** (escalar/restart/excluir/cordon/drain/rollback/cronjob) exigem **Aprovar/Negar** na UI.
 - Pode ser limitado a só diagnosticar (`LENSFY_AI_ALLOW_MUTATIONS=false`) e os diagnósticos podem ser **salvos como relatórios**.
 
 ### Plataforma
@@ -299,7 +305,7 @@ lensfy/
     ├── app/
     │   ├── api/          # rotas REST (/api): clusters, pods, deployments,
     │   │                 #   resources, logs, metrics, helm, portforward,
-    │   │                 #   security, crds, capacity, multicluster,
+    │   │                 #   security, crds, capacity, impact, multicluster,
     │   │                 #   ai, onboarding
     │   ├── websocket/    # canais em tempo real (/ws): logs, terminal,
     │   │                 #   watch, events, metrics, ai, kubectl

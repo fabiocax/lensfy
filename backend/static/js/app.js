@@ -105,6 +105,7 @@
   Object.assign(VIEW_LABELS, {
     issues: 'Problemas', budget: 'Recursos', map: 'Mapa',
     security: 'Segurança', rbac: 'RBAC', capacity: 'Capacidade', search: 'Busca global',
+    impact: 'Impacto',
   });
 
   // ---------- helpers ----------
@@ -889,7 +890,7 @@
     // Destaca o item do menu superior correspondente à view atual.
     [['nav-issues', 'issues'], ['nav-budget', 'budget'], ['nav-map', 'map'],
      ['nav-security', 'security'], ['nav-rbac', 'rbac'], ['nav-capacity', 'capacity'],
-     ['nav-search', 'search']].forEach(([bid, v]) => {
+     ['nav-impact', 'impact'], ['nav-search', 'search']].forEach(([bid, v]) => {
       const b = $('#' + bid);
       if (b) b.classList.toggle('active', state.view === v);
     });
@@ -909,6 +910,7 @@
       if (state.view === 'security') return await viewSecurity(cur);
       if (state.view === 'rbac') return await viewRBAC(cur);
       if (state.view === 'capacity') return await viewCapacity(cur);
+      if (state.view === 'impact') return await viewImpact(cur);
       if (state.view === 'crds') return await viewCRDs(cur);
       if (state.view === 'metrics') return await viewMetrics(cur);
       if (state.view === 'pods') return await viewPods(cur);
@@ -1969,6 +1971,115 @@
         }
       },
     });
+  }
+
+  // ---------- Análise de impacto / blast radius (busca reversa) ----------
+  let impactKind = 'configmaps';
+  const IMPACT_KINDS = [
+    { id: 'configmaps', label: 'ConfigMap' },
+    { id: 'secrets', label: 'Secret' },
+    { id: 'pvc', label: 'PVC' },
+    { id: 'nodes', label: 'Node' },
+  ];
+  const WL_TREE = {
+    Deployment: 'deployments', StatefulSet: 'statefulsets', DaemonSet: 'daemonsets',
+    Job: 'jobs', CronJob: 'cronjobs', Pod: 'pods',
+  };
+  async function viewImpact(cur) {
+    setActions('');
+    const chips = IMPACT_KINDS.map((k) =>
+      `<button class="btn btn-sm chip ${impactKind === k.id ? 'active' : ''}" data-ikind="${k.id}">${k.label}</button>`).join('');
+    $('#view-body').innerHTML =
+      `<div class="impact-view"><div class="dash-card" style="margin-bottom:var(--space-4)">` +
+      `<h3 style="margin:0 0 var(--space-2)"><i class="fas fa-bullseye"></i> Análise de impacto (blast radius)</h3>` +
+      `<p style="color:var(--text-tertiary);margin:0 0 var(--space-3)">Quem depende de um recurso e o que é afetado se ele cair. ` +
+      `ConfigMap/Secret/PVC mostram os consumidores; Node mostra o raio de impacto e workloads SPOF.</p>` +
+      `<div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">${chips}` +
+      `<select class="input input-inline" id="imp-res" style="flex:0 1 320px"><option>carregando…</option></select>` +
+      `<button class="btn btn-primary btn-sm" id="imp-run">Analisar</button></div></div>` +
+      `<div id="imp-results"></div></div>`;
+    $('#view-body').querySelectorAll('[data-ikind]').forEach((b) =>
+      b.addEventListener('click', () => {
+        if (impactKind !== b.dataset.ikind) { impactKind = b.dataset.ikind; viewImpact(cur); }
+      }));
+    await loadImpactOptions(cur);
+    $('#imp-run').addEventListener('click', () => runImpact(cur));
+  }
+  async function loadImpactOptions(cur) {
+    const sel = $('#imp-res');
+    try {
+      const data = await api(`/resources?cluster_id=${cur.id}&kind=${impactKind}`);
+      let rows = data.rows || [];
+      const namespaced = data.namespaced;
+      if (namespaced) rows = rows.filter((r) => nsMatch(r.namespace));
+      if (!rows.length) { sel.innerHTML = '<option value="">(nenhum recurso)</option>'; return; }
+      sel.innerHTML = rows.map((r) => {
+        const val = namespaced ? `${r.namespace}|${r.name}` : `|${r.name}`;
+        const label = namespaced ? `${r.namespace}/${r.name}` : r.name;
+        return `<option value="${esc(val)}">${esc(label)}</option>`;
+      }).join('');
+    } catch (e) {
+      sel.innerHTML = `<option value="">erro: ${esc(e.message)}</option>`;
+    }
+  }
+  async function runImpact(cur) {
+    const val = $('#imp-res').value;
+    const box = $('#imp-results');
+    if (!val) { box.innerHTML = ''; return; }
+    const [ns, name] = val.split('|');
+    box.innerHTML = '<div class="empty-state" style="height:120px"><div class="spinner"></div></div>';
+    let data;
+    try {
+      const nsq = ns ? `&namespace=${encodeURIComponent(ns)}` : '';
+      data = await api(`/impact?cluster_id=${cur.id}&kind=${impactKind}&name=${encodeURIComponent(name)}${nsq}`);
+    } catch (e) {
+      box.innerHTML = `<p style="color:var(--color-danger)">${esc(e.message)}</p>`;
+      return;
+    }
+    if (state.view !== 'impact' || state.currentId !== cur.id) return;
+    renderImpact(cur, data);
+  }
+  function renderImpact(cur, data) {
+    const box = $('#imp-results');
+    const s = data.summary || {};
+    const wls = data.workloads || [];
+    const isNode = data.target.kind === 'nodes';
+    let html =
+      `<div class="dash-card" style="margin-bottom:var(--space-4)"><div style="display:flex;gap:var(--space-4);flex-wrap:wrap;align-items:center">` +
+      `<span class="bulk-count">${s.pods || 0} pod(s) afetado(s)</span>` +
+      `<span class="bulk-count">${s.workloads || 0} workload(s)</span>` +
+      (isNode ? `<span class="bulk-count" style="color:var(--color-danger)">${s.spof || 0} SPOF</span>` : '') +
+      `</div></div>`;
+    if (isNode && (data.spof || []).length) {
+      const rows = data.spof.map((w) =>
+        `<tr data-kind="${esc(WL_TREE[w.kind] || '')}" data-name="${esc(w.name)}" data-ns="${esc(w.namespace || '')}" style="cursor:pointer">` +
+        `<td><span class="badge danger">SPOF</span></td><td>${esc(w.kind)}</td>` +
+        `<td>${w.namespace ? `<span class="badge">${esc(w.namespace)}</span> ` : ''}<b>${esc(w.name)}</b></td>` +
+        `<td>${w.pods}/${w.replicas} réplica(s) neste nó</td></tr>`).join('');
+      html += `<div class="dash-card" style="margin-bottom:var(--space-4)"><h3 style="margin:0 0 var(--space-2)">` +
+        `<i class="fas fa-triangle-exclamation"></i> Single point of failure</h3>` +
+        `<p style="color:var(--text-tertiary);margin:0 0 var(--space-2)">Todas as réplicas destes workloads estão neste nó — drená-lo ou perdê-lo derruba o serviço.</p>` +
+        `<table class="data-table"><thead><tr><th></th><th>Tipo</th><th>Workload</th><th>Réplicas</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    }
+    if (!wls.length) {
+      html += `<div class="dash-card"><div class="empty-state" style="height:140px"><i class="fas fa-circle-check"></i>` +
+        `<h3>${isNode ? 'Nenhum pod neste nó' : 'Nenhum consumidor'}</h3>` +
+        `<p>${isNode ? '' : 'O recurso não é referenciado por nenhum pod.'}</p></div></div>`;
+    } else {
+      const rows = wls.map((w) =>
+        `<tr data-kind="${esc(WL_TREE[w.kind] || '')}" data-name="${esc(w.name)}" data-ns="${esc(w.namespace || '')}" style="cursor:pointer">` +
+        `<td>${esc(w.kind)}</td><td>${w.namespace ? `<span class="badge">${esc(w.namespace)}</span> ` : ''}<b>${esc(w.name)}</b></td>` +
+        `<td>${w.pods}</td><td>${(w.via || []).map((v) => `<span class="badge">${esc(v)}</span>`).join(' ')}</td></tr>`).join('');
+      html += `<div class="dash-card"><h3 style="margin:0 0 var(--space-2)"><i class="fas fa-diagram-project"></i> ` +
+        `${isNode ? 'Workloads no nó' : 'Consumidores'} <span class="log-count">(${wls.length})</span></h3>` +
+        `<table class="data-table"><thead><tr><th>Tipo</th><th>Workload</th><th>Pods</th><th>${isNode ? 'Relação' : 'Como referencia'}</th></tr></thead>` +
+        `<tbody>${rows}</tbody></table></div>`;
+    }
+    box.innerHTML = html;
+    box.querySelectorAll('tr[data-name]').forEach((tr) =>
+      tr.addEventListener('click', () => {
+        if (tr.dataset.kind) openDetail(cur, tr.dataset.kind, tr.dataset.name, tr.dataset.ns || '', null, null);
+      }));
   }
 
   // ---------- Busca global (entre clusters) ----------
@@ -5137,6 +5248,7 @@ spec:
     $('#nav-security').addEventListener('click', () => goView('security'));
     $('#nav-rbac').addEventListener('click', () => goView('rbac'));
     $('#nav-capacity').addEventListener('click', () => goView('capacity'));
+    $('#nav-impact').addEventListener('click', () => goView('impact'));
     $('#nav-search').addEventListener('click', () => goView('search'));
     $('#btn-refresh').addEventListener('click', refreshCluster);
     document.querySelectorAll('[data-close]').forEach((b) =>

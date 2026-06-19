@@ -57,6 +57,12 @@ The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2
 - **"Who can do what":** aggregates every RBAC subject (User/Group/ServiceAccount) and the verbs/resources granted by its bound roles, flagging **cluster-admins**.
 - **`can-i` simulator:** authoritative permission check (SubjectAccessReview) for the current credential or a specific ServiceAccount/user.
 
+### Impact analysis (blast radius) ⭐
+**Reverse** dependency lookup — answers questions the Kubernetes API can't answer directly:
+- **"Where is this ConfigMap/Secret/PVC used?"** — lists the pods that consume it **and how** (volume, projected volume, `envFrom`, `env`, `imagePullSecret`), aggregated by workload.
+- **"What breaks if I drain this node?"** — a **Node**'s blast radius: the pods/workloads running on it and **SPOF** detection (workloads whose replicas all sit on the same node).
+- Every result is clickable and opens the resource in the detail panel. Also available as an AI assistant tool.
+
 ### Real time (terminal, logs, console)
 - **Live logs:** filter, auto-scroll, copy, download, and container selector.
 - **Terminal/console (xterm.js):** pod `exec` (PTY), **node shell** (Lens-style, via a privileged pod + `nsenter`), and a **`kubectl` shell** already scoped to the cluster context.
@@ -78,7 +84,7 @@ The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2
 - **Helm:** releases, install/upgrade/rollback, and uninstall.
 
 ### AI assistant (optional)
-- An SRE agent on the **Claude API** (Messages API, via `httpx` — no extra SDK): **read-only** tools (overview, list/view resources, logs, top, **security scan, RBAC `can-i`, capacity, rightsizing, and CRDs**) run automatically; **cluster-changing actions** (scale/restart/delete/cordon/drain/rollback/cronjob) require **Approve/Deny** in the UI.
+- An SRE agent on the **Claude API** (Messages API, via `httpx` — no extra SDK): **read-only** tools (overview, list/view resources, logs, top, **security scan, RBAC `can-i`, capacity, rightsizing, CRDs, and impact analysis**) run automatically; **cluster-changing actions** (scale/restart/delete/cordon/drain/rollback/cronjob) require **Approve/Deny** in the UI.
 - It can be limited to diagnose-only (`LENSFY_AI_ALLOW_MUTATIONS=false`), and diagnoses can be **saved as reports**.
 
 ### Platform
@@ -299,7 +305,7 @@ lensfy/
     ├── app/
     │   ├── api/          # REST routes (/api): clusters, pods, deployments,
     │   │                 #   resources, logs, metrics, helm, portforward,
-    │   │                 #   security, crds, capacity, multicluster,
+    │   │                 #   security, crds, capacity, impact, multicluster,
     │   │                 #   ai, onboarding
     │   ├── websocket/    # real-time channels (/ws): logs, terminal,
     │   │                 #   watch, events, metrics, ai, kubectl

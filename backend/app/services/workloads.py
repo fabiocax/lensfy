@@ -291,6 +291,13 @@ class WorkloadService:
         except KubernetesError as exc:
             raise WorkloadServiceError(str(exc)) from exc
 
+    # --- análise de impacto (blast radius) ---
+    def impact(self, cluster_id, kind, name, namespace=None):
+        try:
+            return self._client(cluster_id).impact(kind, name, namespace)
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
     def start_port_forward(self, cluster_id, namespace, pod, remote_port, local_port):
         from app.kubernetes.portforward import manager
 
