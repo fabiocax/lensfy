@@ -898,6 +898,53 @@ html, body {
 }
 .logs-output:empty::before { content: "Aguardando logs…"; color: var(--text-tertiary); }
 
+/* Detecção inteligente de problemas em logs ao vivo */
+.logline { display: block; }
+.logline.log-err {
+    color: #ff8585;
+    background: rgba(255, 80, 80, 0.10);
+    box-shadow: inset 3px 0 0 var(--color-danger);
+    padding-left: 6px;
+}
+.logline.log-warn {
+    color: #e8c15a;
+    background: rgba(220, 170, 0, 0.08);
+    box-shadow: inset 3px 0 0 var(--color-warning, #d6a700);
+    padding-left: 6px;
+}
+.logs-problems.has-problems { color: var(--color-danger); border-color: var(--color-danger); }
+.logs-problems.active { background: var(--color-danger); color: #fff; }
+.logs-problems-panel {
+    margin: 0 var(--space-3);
+    max-height: 38%;
+    overflow: auto;
+    background: var(--bg-darker);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: var(--space-2);
+}
+.logs-prob-group {
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    gap: var(--space-2);
+    align-items: center;
+    padding: 4px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: var(--font-size-sm);
+}
+.logs-prob-group:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
+.logs-prob-group.active { background: rgba(255, 80, 80, 0.12); }
+.logs-prob-group .sig {
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.logs-prob-group .cnt { font-weight: 700; }
+.logs-prob-empty { color: var(--text-tertiary); padding: var(--space-2); }
+
 .close-btn { background: none; border: none; color: var(--text-tertiary); font-size: var(--font-size-xl); cursor: pointer; }
 .close-btn:hover { color: var(--text-light); }
 

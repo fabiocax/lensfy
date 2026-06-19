@@ -65,11 +65,12 @@ The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2
 
 ### Real time (terminal, logs, console)
 - **Live logs:** filter, auto-scroll, copy, download, and container selector.
+- **Smart problem detection (live):** every line is classified in real time by heuristics (panic/crash, OOM, exceptions, network, timeout, auth, HTTP 5xx, DB errors, ERROR/WARN levels…), with **severity highlighting**, an **error/warning count**, and a **"problems only"** filter. Occurrences of the same problem are **grouped by signature** (timestamps/ids/IPs normalized) into a panel with a sample and count — and an **"Analyze"** button sends the summary to the AI assistant for root cause and fixes.
 - **Terminal/console (xterm.js):** pod `exec` (PTY), **node shell** (Lens-style, via a privileged pod + `nsenter`), and a **`kubectl` shell** already scoped to the cluster context.
 - **Lens-style bottom dock:** logs, console, YAML, and AI as **tabs**, several at once, in a resizable panel that pushes the view (it does not overlap it).
 
 ### YAML editor & deploy
-- **YAML editor (Monaco)** to view/edit/apply any resource, with **Kubernetes autocomplete** and **diff**.
+- **YAML editor (Monaco)** to view/edit/apply any resource, with **diff** and **context-aware Kubernetes autocomplete**: suggests keys based on the document's `kind`, values only where they belong (`apiVersion`, `kind`, enums like `imagePullPolicy`/`type`/`protocol`/`pathType`/`accessModes`/`policyTypes`…), and skeleton snippets.
 - **Version history (up to 5)** per resource, recorded on every *Apply*: load a version, **diff against the editor**, or **diff between two versions**.
 - **Robust apply:** realigns `resourceVersion` to current state and retries on conflict (no intermittent save failures).
 - **Manifest deploy:** Monaco editor with **15+ templates** (Deployment, StatefulSet, DaemonSet, HPA, PVC, NetworkPolicy, ServiceAccount…), a **Builder** (form → YAML), and drag-and-drop of YAML files/folders (multi-document). Namespace field with **autocomplete** from the cluster's namespaces, plus **copy/download/clear** buttons for the YAML.

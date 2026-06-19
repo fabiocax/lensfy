@@ -65,11 +65,12 @@ Busca **reversa** de dependências — responde perguntas que a API do Kubernete
 
 ### Tempo real (terminal, logs, console)
 - **Logs ao vivo:** filtro, auto-scroll, copiar, baixar e seletor de container.
+- **Detecção inteligente de problemas (ao vivo):** cada linha é classificada em tempo real por heurísticas (panic/crash, OOM, exceções, rede, timeout, auth, HTTP 5xx, erros de banco, níveis ERROR/WARN…), com **realce** por severidade, **contagem de erros/alertas** e um filtro **"só problemas"**. Ocorrências do mesmo problema são **agrupadas por assinatura** (timestamps/ids/IPs normalizados) num painel com amostra e contagem — e um botão **"Analisar"** envia o resumo ao assistente de IA para causa raiz e correção.
 - **Terminal/console (xterm.js):** `exec` em pod (PTY), **shell de nó** (estilo Lens, via pod privilegiado + `nsenter`) e **shell `kubectl`** já no contexto do cluster.
 - **Dock inferior estilo Lens:** logs, console, YAML e IA em **abas**, várias ao mesmo tempo, painel redimensionável que empurra a view (não sobrepõe).
 
 ### Editor YAML & deploy
-- **Editor YAML (Monaco)** para ver/editar/aplicar qualquer recurso, com **autocomplete de Kubernetes** e **diff**.
+- **Editor YAML (Monaco)** para ver/editar/aplicar qualquer recurso, com **diff** e **autocomplete de Kubernetes sensível ao contexto**: sugere chaves conforme o `kind` do documento, valores corretos só onde cabem (`apiVersion`, `kind`, enums como `imagePullPolicy`/`type`/`protocol`/`pathType`/`accessModes`/`policyTypes`…) e snippets de esqueleto.
 - **Histórico de versões (até 5)** por recurso, gravado a cada *Aplicar*: carregar uma versão, **diff contra o editor** ou **diff entre duas versões**.
 - **Apply robusto:** realinha o `resourceVersion` ao estado atual e repete em conflito (sem falhas intermitentes de save).
 - **Deploy de manifestos:** editor Monaco com **15+ templates** (Deployment, StatefulSet, DaemonSet, HPA, PVC, NetworkPolicy, ServiceAccount…), **Construtor** (formulário → YAML) e arrastar-e-soltar de arquivos/pastas YAML (multi-documento). Campo de namespace com **autocomplete** dos namespaces do cluster, e botões para **copiar/baixar/limpar** o YAML.

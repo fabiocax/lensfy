@@ -163,11 +163,15 @@
                             <select class="input input-inline logs-container" style="display:none"></select>
                             <input class="input input-inline logs-search" placeholder="filtrar…">
                             <label class="log-toggle"><input type="checkbox" class="logs-autoscroll" checked> Auto-scroll</label>
+                            <label class="log-toggle"><input type="checkbox" class="logs-onlyprob"> Só problemas</label>
                             <span class="log-count logs-count"></span>
                             <span class="spacer"></span>
+                            <button class="btn btn-sm logs-problems" title="Problemas detectados nos logs"><i class="fas fa-triangle-exclamation"></i> <span class="logs-prob-count">0</span></button>
+                            <button class="btn btn-sm logs-analyze" title="Analisar problemas com a IA" hidden><i class="fas fa-robot"></i> Analisar</button>
                             <button class="btn btn-sm logs-copy" title="Copiar"><i class="fas fa-copy"></i></button>
                             <button class="btn btn-sm logs-download" title="Baixar"><i class="fas fa-download"></i></button>
                         </div>
+                        <div class="logs-problems-panel" hidden></div>
                         <div class="logs-output"></div>
                     </div>
                 </template>

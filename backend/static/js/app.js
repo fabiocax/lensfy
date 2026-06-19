@@ -1207,6 +1207,13 @@
       setBusy(true);
     }
     sendBtn.addEventListener('click', send);
+    // Permite que outros painéis (ex.: análise de logs) façam uma pergunta à IA.
+    // Enfileira até o socket abrir, se necessário.
+    inst.ask = (text) => {
+      const run = () => { input.value = text; send(); };
+      if (sock.readyState === 1) run();
+      else sock.addEventListener('open', run, { once: true });
+    };
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -3166,22 +3173,89 @@
   // ---------- log viewer (streaming via /ws/logs) ----------
   const logsInst = {}; // id -> { socket, lines, cur, name, ns, container, containers, max, pane, els }
 
+  // ---------- detecção inteligente de problemas em logs (ao vivo) ----------
+  // Regras heurísticas: cada linha é classificada em tempo real conforme chega.
+  // sev: error|warn; cat: rótulo da categoria do problema.
+  const LOG_RULES = [
+    { cat: 'panic/crash', sev: 'error', re: /\b(panic|fatal\s*error|segfault|sigsegv|sigabrt|core dumped|stack overflow|assertion failed)\b/i },
+    { cat: 'OOM', sev: 'error', re: /\b(oomkilled|out of memory|cannot allocate memory|memory limit (?:exceeded|reached)|killed process)\b/i },
+    { cat: 'exceção', sev: 'error', re: /(exception\b|traceback|unhandled|panic:|null ?pointer|undefined is not|cannot read propert|uncaught|stack ?trace)/i },
+    { cat: 'rede', sev: 'error', re: /\b(connection refused|connection reset|no route to host|broken pipe|dial tcp|network is unreachable|i\/o timeout|tls handshake|certificate)\b/i },
+    { cat: 'timeout', sev: 'error', re: /\b(timed?\s*out|context deadline exceeded|deadline exceeded|read timeout|request timeout)\b/i },
+    { cat: 'auth', sev: 'error', re: /(\bunauthorized\b|\bforbidden\b|permission denied|access denied|authentication failed|invalid credentials|\b401\b|\b403\b)/i },
+    { cat: 'HTTP 5xx', sev: 'error', re: /\b(internal server error|bad gateway|service unavailable|gateway timeout|http[\/ ]?\s*5\d\d|status[=:\s]+5\d\d)\b/i },
+    { cat: 'banco', sev: 'error', re: /\b(deadlock|too many connections|duplicate key|could not connect|connection pool exhausted|query failed)\b/i },
+    { cat: 'erro', sev: 'error', re: /(^|\s|\[|")(error|errors|fatal|critical|crit|severe|emerg|panic)(\s|\]|"|:|=|$)/i },
+    { cat: 'falha', sev: 'error', re: /\b(failed to|failure|failed)\b/i },
+    { cat: 'alerta', sev: 'warn', re: /(^|\s|\[|")(warn|warning|deprecated)(\s|\]|"|:|=|$)/i },
+  ];
+
+  function classifyLogLine(line) {
+    let sev = null;
+    const cats = [];
+    for (const r of LOG_RULES) {
+      if (r.re.test(line)) {
+        cats.push(r.cat);
+        if (r.sev === 'error') sev = 'error';
+        else if (!sev) sev = 'warn';
+      }
+    }
+    if (!sev) return null;
+    // Prefere uma categoria específica ao rótulo genérico de nível (erro/alerta).
+    const cat = cats.find((c) => c !== 'erro' && c !== 'alerta') || cats[0];
+    return { sev, cat };
+  }
+
+  // Assinatura normalizada (timestamps/números/ids/IPs/aspas viram placeholders)
+  // para agrupar ocorrências do MESMO problema.
+  function logSignature(line) {
+    let s = line;
+    s = s.replace(/^\s*\[?\d{4}-\d{2}-\d{2}[ T][\d:.,]+Z?\]?\s*/, '');
+    s = s.replace(/^\s*\[?\d{2}:\d{2}:\d{2}[.,\d]*\]?\s*/, '');
+    s = s.replace(/0x[0-9a-fA-F]+/g, '0x#');
+    s = s.replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, '<uuid>');
+    s = s.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b/g, '<ip>');
+    s = s.replace(/"[^"]*"/g, '"…"').replace(/'[^']*'/g, "'…'");
+    s = s.replace(/\b\d+\b/g, '#');
+    return s.replace(/\s+/g, ' ').trim().slice(0, 200);
+  }
+
+  // Status do assistente de IA (cacheado) — controla o botão "Analisar".
+  let _aiStatusCache;
+  async function aiAvailable() {
+    if (_aiStatusCache === undefined) {
+      try {
+        _aiStatusCache = (await api('/ai/status')).available;
+      } catch (_) {
+        _aiStatusCache = false;
+      }
+    }
+    return _aiStatusCache;
+  }
+
   function showLogs(cur, name, ns, containers) {
     const key = `logs|${cur.id}|${ns}|${name}`;
     const { id, pane, isNew } = openOrFocusTab('logs', key, name, { name, ns, containers });
     if (!isNew) return; // já aberto: apenas foca a aba
     const conts = (containers || []).filter(Boolean);
     const inst = (logsInst[id] = {
-      id, pane, socket: null, lines: [], cur, name, ns,
+      id, pane, socket: null, lines: [], cls: [], cur, name, ns,
       containers: conts, container: conts[0] || '', max: 5000,
+      problems: new Map(), problemCount: 0, errorCount: 0, warnCount: 0,
+      onlyProblems: false, activeSig: null, panelOpen: false,
       els: {
         title: pane.querySelector('.logs-title'),
         status: pane.querySelector('.logs-status'),
         container: pane.querySelector('.logs-container'),
         search: pane.querySelector('.logs-search'),
         autoscroll: pane.querySelector('.logs-autoscroll'),
+        onlyprob: pane.querySelector('.logs-onlyprob'),
         count: pane.querySelector('.logs-count'),
         output: pane.querySelector('.logs-output'),
+        problems: pane.querySelector('.logs-problems'),
+        probCount: pane.querySelector('.logs-prob-count'),
+        panel: pane.querySelector('.logs-problems-panel'),
+        analyze: pane.querySelector('.logs-analyze'),
         copy: pane.querySelector('.logs-copy'),
         download: pane.querySelector('.logs-download'),
       },
@@ -3198,14 +3272,28 @@
     }
     inst.els.search.addEventListener('input', () => renderLogs(inst));
     inst.els.autoscroll.addEventListener('change', () => renderLogs(inst));
+    inst.els.onlyprob.addEventListener('change', () => {
+      inst.onlyProblems = inst.els.onlyprob.checked;
+      renderLogs(inst);
+    });
+    inst.els.problems.addEventListener('click', () => toggleProblemsPanel(inst));
+    inst.els.analyze.addEventListener('click', () => analyzeLogs(inst));
     inst.els.copy.addEventListener('click', () => copyLogs(inst));
     inst.els.download.addEventListener('click', () => downloadLogs(inst));
+    // O botão "Analisar (IA)" só aparece se o assistente estiver configurado.
+    aiAvailable().then((ok) => {
+      if (ok && inst.els.analyze) inst.els.analyze.hidden = false;
+    });
     connectLogs(inst);
   }
 
   function connectLogs(inst) {
     closeLogSocket(inst);
     inst.lines = [];
+    inst.cls = [];
+    inst.problems = new Map();
+    inst.problemCount = inst.errorCount = inst.warnCount = 0;
+    inst.activeSig = null;
     inst.els.title.textContent =
       `Logs · ${inst.ns}/${inst.name}` + (inst.container ? ` · ${inst.container}` : '');
     inst.els.output.textContent = '';
@@ -3239,7 +3327,26 @@
 
   function appendLog(inst, line) {
     inst.lines.push(line);
-    if (inst.lines.length > inst.max) inst.lines.splice(0, inst.lines.length - inst.max);
+    const c = classifyLogLine(line);
+    if (c) c.sig = logSignature(line);
+    inst.cls.push(c);
+    if (c) {
+      inst.problemCount++;
+      if (c.sev === 'error') inst.errorCount++;
+      else inst.warnCount++;
+      const key = c.sev + '|' + c.sig;
+      let g = inst.problems.get(key);
+      if (!g) {
+        g = { sev: c.sev, cat: c.cat, sig: c.sig, count: 0, sample: line };
+        inst.problems.set(key, g);
+      }
+      g.count++;
+    }
+    if (inst.lines.length > inst.max) {
+      const drop = inst.lines.length - inst.max;
+      inst.lines.splice(0, drop);
+      inst.cls.splice(0, drop);
+    }
     scheduleLogRender(inst);
   }
 
@@ -3256,13 +3363,100 @@
 
   function renderLogs(inst) {
     const q = inst.els.search.value.trim().toLowerCase();
-    const shown = q ? inst.lines.filter((l) => l.toLowerCase().includes(q)) : inst.lines;
     const out = inst.els.output;
-    out.textContent = shown.join('\n');
-    inst.els.count.textContent = q
-      ? `${shown.length}/${inst.lines.length} linhas`
-      : `${inst.lines.length} linhas`;
+    const onlyProb = inst.onlyProblems;
+    const sig = inst.activeSig;
+    const parts = [];
+    let shown = 0;
+    for (let i = 0; i < inst.lines.length; i++) {
+      const line = inst.lines[i];
+      const c = inst.cls[i];
+      if (onlyProb && !c) continue;
+      if (sig && (!c || c.sig !== sig)) continue;
+      if (q && !line.toLowerCase().includes(q)) continue;
+      shown++;
+      const cls = c ? (c.sev === 'error' ? 'logline log-err' : 'logline log-warn') : 'logline';
+      parts.push(`<span class="${cls}">${esc(line) || ' '}</span>`);
+    }
+    out.innerHTML = parts.join('');
+    const filtered = q || onlyProb || sig;
+    const probTxt = inst.problemCount
+      ? ` · ${inst.errorCount} erro(s), ${inst.warnCount} alerta(s)`
+      : '';
+    inst.els.count.textContent =
+      (filtered ? `${shown}/${inst.lines.length} linhas` : `${inst.lines.length} linhas`) + probTxt;
+    updateProblemsBadge(inst);
+    if (inst.panelOpen) renderProblemsPanel(inst);
     if (inst.els.autoscroll.checked) out.scrollTop = out.scrollHeight;
+  }
+
+  function updateProblemsBadge(inst) {
+    const b = inst.els.problems;
+    inst.els.probCount.textContent = inst.problemCount;
+    b.classList.toggle('has-problems', inst.errorCount > 0);
+    b.classList.toggle('active', inst.panelOpen);
+  }
+
+  function toggleProblemsPanel(inst) {
+    inst.panelOpen = !inst.panelOpen;
+    inst.els.panel.hidden = !inst.panelOpen;
+    if (inst.panelOpen) renderProblemsPanel(inst);
+    updateProblemsBadge(inst);
+  }
+
+  function renderProblemsPanel(inst) {
+    const panel = inst.els.panel;
+    const groups = [...inst.problems.values()].sort(
+      (a, b) => (a.sev === b.sev ? b.count - a.count : a.sev === 'error' ? -1 : 1)
+    );
+    if (!groups.length) {
+      panel.innerHTML = '<div class="logs-prob-empty">Nenhum problema detectado até agora. 🎉</div>';
+      return;
+    }
+    panel.innerHTML = groups
+      .slice(0, 100)
+      .map((g) => {
+        const badge = g.sev === 'error'
+          ? '<span class="badge danger">erro</span>'
+          : '<span class="badge warning">alerta</span>';
+        const active = inst.activeSig === g.sig ? ' active' : '';
+        return (
+          `<div class="logs-prob-group${active}" data-sig="${esc(g.sig)}" title="${esc(g.sample)}">` +
+          `${badge}<span class="badge">${esc(g.cat)}</span>` +
+          `<span class="sig">${esc(g.sample)}</span>` +
+          `<span class="cnt">×${g.count}</span></div>`
+        );
+      })
+      .join('');
+    panel.querySelectorAll('[data-sig]').forEach((row) =>
+      row.addEventListener('click', () => {
+        inst.activeSig = inst.activeSig === row.dataset.sig ? null : row.dataset.sig;
+        renderLogs(inst);
+      })
+    );
+  }
+
+  // Envia um resumo dos problemas detectados ao assistente de IA para análise.
+  function analyzeLogs(inst) {
+    if (!inst.problems.size) return window.toast('Nenhum problema detectado para analisar', 'warning');
+    const groups = [...inst.problems.values()].sort(
+      (a, b) => (a.sev === b.sev ? b.count - a.count : a.sev === 'error' ? -1 : 1)
+    ).slice(0, 10);
+    const lines = groups.map((g) => `- [${g.sev}/${g.cat}] ×${g.count}: ${g.sample.slice(0, 240)}`);
+    const prompt =
+      `Analise os problemas detectados nos logs ao vivo do pod ${inst.ns}/${inst.name}` +
+      (inst.container ? ` (container ${inst.container})` : '') +
+      `. Aponte a causa raiz provável e como corrigir. Você pode buscar mais logs/eventos se precisar.\n\n` +
+      `Problemas (agrupados, com contagem):\n${lines.join('\n')}`;
+    askAILogs(inst.cur, prompt);
+  }
+
+  async function askAILogs(cur, text) {
+    await openAI(cur);
+    const tab = state.dock.tabs.find((t) => t.type === 'ai' && t.key === `ai|${cur.id}`);
+    const inst = tab && aiInst[tab.id];
+    if (inst && inst.ask) inst.ask(text);
+    else window.toast('Assistente IA indisponível', 'warning');
   }
 
   function setLogStatus(inst, kind, label) {
@@ -3480,43 +3674,200 @@
     return monacoReady;
   }
 
-  // Autocomplete Kubernetes para YAML (chaves, valores de kind/apiVersion e snippets).
+  // Autocomplete Kubernetes para YAML, sensível ao contexto:
+  //  - valores só onde fazem sentido (apiVersion:/kind:/enums e itens de lista);
+  //  - chaves relevantes ao kind do documento atual;
+  //  - snippets de esqueleto (k8s:deployment, …).
+  const K8S_KINDS = [
+    'Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet', 'Pod', 'Service',
+    'ConfigMap', 'Secret', 'Ingress', 'Job', 'CronJob', 'Namespace',
+    'PersistentVolumeClaim', 'HorizontalPodAutoscaler', 'NetworkPolicy',
+    'ServiceAccount', 'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding',
+    'LimitRange', 'ResourceQuota',
+  ];
+  const K8S_APIVERSIONS = [
+    'v1', 'apps/v1', 'batch/v1', 'networking.k8s.io/v1', 'autoscaling/v2',
+    'rbac.authorization.k8s.io/v1', 'storage.k8s.io/v1', 'policy/v1',
+  ];
+  // Valores sugeridos após "<chave>:".
+  const VALUE_ENUMS = {
+    apiVersion: K8S_APIVERSIONS, kind: K8S_KINDS,
+    imagePullPolicy: ['Always', 'IfNotPresent', 'Never'],
+    restartPolicy: ['Always', 'OnFailure', 'Never'],
+    type: ['ClusterIP', 'NodePort', 'LoadBalancer', 'ExternalName'],
+    protocol: ['TCP', 'UDP', 'SCTP'],
+    pathType: ['Prefix', 'Exact', 'ImplementationSpecific'],
+    concurrencyPolicy: ['Allow', 'Forbid', 'Replace'],
+    volumeMode: ['Filesystem', 'Block'],
+    dnsPolicy: ['ClusterFirst', 'Default', 'ClusterFirstWithHostNet', 'None'],
+  };
+  // Valores sugeridos em itens de lista ("- <valor>") por chave-pai.
+  const LIST_ENUMS = {
+    policyTypes: ['Ingress', 'Egress'],
+    accessModes: ['ReadWriteOnce', 'ReadOnlyMany', 'ReadWriteMany', 'ReadWriteOncePod'],
+  };
+  // Snippets de chave (campo -> texto inserido).
+  const FIELD_SNIPPETS = {
+    apiVersion: 'apiVersion: ${1}', kind: 'kind: ${1}',
+    metadata: 'metadata:\n  name: ${1:name}', name: 'name: ${1}', namespace: 'namespace: ${1:default}',
+    labels: 'labels:\n  app: ${1:app}', annotations: 'annotations:\n  ${1:key}: ${2:value}',
+    spec: 'spec:\n  ${1}',
+    replicas: 'replicas: ${1:1}',
+    selector: 'selector:\n  matchLabels:\n    app: ${1:app}',
+    serviceName: 'serviceName: ${1:svc}',
+    template: 'template:\n  metadata:\n    labels:\n      app: ${1:app}\n  spec:\n    containers:\n      - name: ${2:c}\n        image: ${3:nginx:alpine}',
+    strategy: 'strategy:\n  type: ${1:RollingUpdate}',
+    volumeClaimTemplates: 'volumeClaimTemplates:\n  - metadata:\n      name: ${1:dados}\n    spec:\n      accessModes: ["ReadWriteOnce"]\n      resources:\n        requests:\n          storage: ${2:1Gi}',
+    containers: 'containers:\n  - name: ${1:c}\n    image: ${2:nginx:alpine}',
+    image: 'image: ${1}', imagePullPolicy: 'imagePullPolicy: ${1:IfNotPresent}',
+    ports: 'ports:\n  - containerPort: ${1:80}',
+    env: 'env:\n  - name: ${1:KEY}\n    value: "${2:value}"',
+    envFrom: 'envFrom:\n  - configMapRef:\n      name: ${1:cm}',
+    resources: 'resources:\n  requests:\n    cpu: ${1:100m}\n    memory: ${2:128Mi}\n  limits:\n    cpu: ${3:500m}\n    memory: ${4:256Mi}',
+    volumeMounts: 'volumeMounts:\n  - name: ${1:vol}\n    mountPath: ${2:/data}',
+    volumes: 'volumes:\n  - name: ${1:vol}\n    emptyDir: {}',
+    command: 'command: ["${1:sh}", "${2:-c}", "${3:echo hi}"]', args: 'args: ["${1}"]',
+    livenessProbe: 'livenessProbe:\n  httpGet:\n    path: ${1:/}\n    port: ${2:80}\n  initialDelaySeconds: ${3:10}',
+    readinessProbe: 'readinessProbe:\n  httpGet:\n    path: ${1:/}\n    port: ${2:80}',
+    nodeSelector: 'nodeSelector:\n  ${1:disktype}: ${2:ssd}',
+    serviceAccountName: 'serviceAccountName: ${1}', restartPolicy: 'restartPolicy: ${1:Never}',
+    type: 'type: ${1}', port: 'port: ${1:80}', targetPort: 'targetPort: ${1:80}', protocol: 'protocol: ${1:TCP}',
+    data: 'data:\n  ${1:key}: "${2:value}"', stringData: 'stringData:\n  ${1:key}: "${2:value}"',
+    ingressClassName: 'ingressClassName: ${1:nginx}',
+    rules: 'rules:\n  - host: ${1:host.example.com}\n    http:\n      paths:\n        - path: ${2:/}\n          pathType: ${3:Prefix}\n          backend:\n            service:\n              name: ${4:svc}\n              port:\n                number: ${5:80}',
+    tls: 'tls:\n  - hosts:\n      - ${1:host.example.com}\n    secretName: ${2:tls-secret}',
+    pathType: 'pathType: ${1:Prefix}',
+    accessModes: 'accessModes: ["${1:ReadWriteOnce}"]', storageClassName: 'storageClassName: ${1}',
+    volumeMode: 'volumeMode: ${1:Filesystem}',
+    scaleTargetRef: 'scaleTargetRef:\n  apiVersion: apps/v1\n  kind: Deployment\n  name: ${1:app}',
+    minReplicas: 'minReplicas: ${1:1}', maxReplicas: 'maxReplicas: ${1:5}',
+    metrics: 'metrics:\n  - type: Resource\n    resource:\n      name: cpu\n      target:\n        type: Utilization\n        averageUtilization: ${1:70}',
+    podSelector: 'podSelector: {}', policyTypes: 'policyTypes:\n  - ${1:Ingress}',
+    schedule: 'schedule: "${1:*/5 * * * *}"',
+    jobTemplate: 'jobTemplate:\n  spec:\n    template:\n      spec:\n        restartPolicy: OnFailure\n        containers:\n          - name: ${1:c}\n            image: ${2:busybox}',
+    suspend: 'suspend: ${1:false}', concurrencyPolicy: 'concurrencyPolicy: ${1:Allow}',
+    completions: 'completions: ${1:1}', parallelism: 'parallelism: ${1:1}', backoffLimit: 'backoffLimit: ${1:4}',
+    automountServiceAccountToken: 'automountServiceAccountToken: ${1:true}',
+    imagePullSecrets: 'imagePullSecrets:\n  - name: ${1:regcred}',
+  };
+  const K8S_COMMON_FIELDS = ['apiVersion', 'kind', 'metadata', 'name', 'namespace', 'labels', 'annotations'];
+  const K8S_POD_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet', 'Job', 'CronJob', 'Pod']);
+  const K8S_POD_CHILDREN = [
+    'containers', 'image', 'imagePullPolicy', 'ports', 'env', 'envFrom', 'resources',
+    'volumeMounts', 'volumes', 'command', 'args', 'livenessProbe', 'readinessProbe',
+    'nodeSelector', 'serviceAccountName', 'restartPolicy', 'imagePullSecrets',
+  ];
+  const K8S_KIND_FIELDS = {
+    Deployment: ['spec', 'replicas', 'selector', 'template', 'strategy'],
+    StatefulSet: ['spec', 'replicas', 'selector', 'template', 'serviceName', 'volumeClaimTemplates'],
+    DaemonSet: ['spec', 'selector', 'template'],
+    ReplicaSet: ['spec', 'replicas', 'selector', 'template'],
+    Pod: ['spec'],
+    Service: ['spec', 'selector', 'type', 'ports', 'port', 'targetPort', 'protocol'],
+    ConfigMap: ['data'],
+    Secret: ['type', 'data', 'stringData'],
+    Ingress: ['spec', 'ingressClassName', 'rules', 'tls'],
+    Job: ['spec', 'template', 'completions', 'parallelism', 'backoffLimit'],
+    CronJob: ['spec', 'schedule', 'jobTemplate', 'suspend', 'concurrencyPolicy'],
+    PersistentVolumeClaim: ['spec', 'accessModes', 'resources', 'storageClassName', 'volumeMode'],
+    HorizontalPodAutoscaler: ['spec', 'scaleTargetRef', 'minReplicas', 'maxReplicas', 'metrics'],
+    NetworkPolicy: ['spec', 'podSelector', 'policyTypes'],
+    ServiceAccount: ['automountServiceAccountToken', 'imagePullSecrets'],
+  };
+
   function registerK8sCompletions(monaco) {
     if (k8sCompletionsDone) return;
     k8sCompletionsDone = true;
     const K = monaco.languages.CompletionItemKind;
     const SNIP = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
-    const field = (label, insertText, detail) => ({ label, kind: K.Field, insertText, insertTextRules: SNIP, detail: detail || 'k8s' });
-    const val = (label, detail) => ({ label, kind: K.Value, insertText: label, detail: detail || 'k8s' });
-    const items = [
-      field('apiVersion', 'apiVersion: ${1}'), field('kind', 'kind: ${1}'),
-      field('metadata', 'metadata:\n  name: ${1:name}\n  namespace: ${2:default}'),
-      field('labels', 'labels:\n  app: ${1:app}'), field('annotations', 'annotations:\n  ${1:key}: ${2:value}'),
-      field('spec', 'spec:\n  ${1}'), field('selector', 'selector:\n  matchLabels:\n    app: ${1:app}'),
-      field('replicas', 'replicas: ${1:1}'),
-      field('containers', 'containers:\n  - name: ${1:c}\n    image: ${2:nginx:alpine}'),
-      field('image', 'image: ${1}'), field('ports', 'ports:\n  - containerPort: ${1:80}'),
-      field('env', 'env:\n  - name: ${1:KEY}\n    value: "${2:value}"'),
-      field('resources', 'resources:\n  requests:\n    cpu: ${1:100m}\n    memory: ${2:128Mi}\n  limits:\n    cpu: ${3:500m}\n    memory: ${4:256Mi}'),
-      field('volumeMounts', 'volumeMounts:\n  - name: ${1:vol}\n    mountPath: ${2:/data}'),
-      field('data', 'data:\n  ${1:key}: "${2:value}"'), field('stringData', 'stringData:\n  ${1:key}: "${2:value}"'),
-      val('Deployment', 'kind'), val('Service'), val('Pod'), val('ConfigMap'), val('Secret'),
-      val('Ingress'), val('Job'), val('CronJob'), val('Namespace'), val('StatefulSet'),
-      val('DaemonSet'), val('PersistentVolumeClaim'),
-      val('apps/v1', 'apiVersion'), val('batch/v1', 'apiVersion'), val('networking.k8s.io/v1', 'apiVersion'),
-      val('rbac.authorization.k8s.io/v1', 'apiVersion'), val('storage.k8s.io/v1', 'apiVersion'),
-    ];
-    Object.entries(DEPLOY_TEMPLATES).forEach(([k, body]) =>
-      items.push({ label: `k8s:${k}`, kind: K.Snippet, insertText: body, detail: 'esqueleto' })
-    );
+
+    // kind do documento que contém `lineNumber` (entre marcadores `---`).
+    const docKindAt = (model, lineNumber) => {
+      const total = model.getLineCount();
+      let start = 1, end = total;
+      for (let l = lineNumber - 1; l >= 1; l--) {
+        if (/^---/.test(model.getLineContent(l))) { start = l + 1; break; }
+      }
+      for (let l = lineNumber + 1; l <= total; l++) {
+        if (/^---/.test(model.getLineContent(l))) { end = l - 1; break; }
+      }
+      for (let l = start; l <= end; l++) {
+        const m = model.getLineContent(l).match(/^kind:\s*([A-Za-z0-9.]+)/);
+        if (m) return m[1];
+      }
+      return null;
+    };
+
+    const valItems = (values, range) =>
+      values.map((v) => ({ label: v, kind: K.Value, insertText: v, detail: 'valor k8s', range }));
+
+    const keyItems = (kind, range) => {
+      let names = K8S_COMMON_FIELDS.slice();
+      if (kind && K8S_KIND_FIELDS[kind]) names = names.concat(K8S_KIND_FIELDS[kind]);
+      else names = names.concat(['spec', 'data', 'type', 'selector', 'ports']);
+      if (!kind || K8S_POD_KINDS.has(kind)) names = names.concat(K8S_POD_CHILDREN);
+      const seen = new Set();
+      const out = [];
+      names.forEach((n) => {
+        if (seen.has(n) || !FIELD_SNIPPETS[n]) return;
+        seen.add(n);
+        out.push({ label: n, kind: K.Field, insertText: FIELD_SNIPPETS[n], insertTextRules: SNIP, detail: 'campo k8s', range });
+      });
+      Object.entries(DEPLOY_TEMPLATES).forEach(([k, body]) =>
+        out.push({ label: `k8s:${k}`, kind: K.Snippet, insertText: body, insertTextRules: SNIP, detail: 'esqueleto', range }));
+      return out;
+    };
+
     monaco.languages.registerCompletionItemProvider('yaml', {
+      triggerCharacters: [':', ' ', '-'],
       provideCompletionItems(model, position) {
+        const before = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+
+        // 1) valor após "<chave>: " → enum específico, ou nada (não poluir valores).
+        const vm = before.match(/^\s*(?:-\s+)?([A-Za-z0-9_.\-/]+):\s+(\S*)$/);
+        if (vm) {
+          const values = VALUE_ENUMS[vm[1]];
+          if (!values) return { suggestions: [] };
+          const typed = vm[2];
+          const range = {
+            startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+            startColumn: position.column - typed.length, endColumn: position.column,
+          };
+          return { suggestions: valItems(values, range) };
+        }
+
+        // 2) item de lista "- <valor>" → enum por chave-pai (senão cai p/ chaves).
+        const lm = before.match(/^(\s*)-\s+(\S*)$/);
+        if (lm) {
+          const indent = lm[1].length;
+          let parent = null;
+          for (let l = position.lineNumber - 1; l >= 1; l--) {
+            const t = model.getLineContent(l);
+            if (/^\s*$/.test(t)) continue;
+            const curIndent = (t.match(/^(\s*)/)[1] || '').length;
+            const km = t.match(/^\s*([A-Za-z0-9_.\-/]+):\s*$/);
+            if (km && curIndent < indent) { parent = km[1]; break; }
+            if (curIndent < indent) break;
+          }
+          const values = LIST_ENUMS[parent];
+          if (values) {
+            const typed = lm[2];
+            const range = {
+              startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+              startColumn: position.column - typed.length, endColumn: position.column,
+            };
+            return { suggestions: valItems(values, range) };
+          }
+          // sem enum: segue para sugestões de chave (campos de objetos da lista)
+        }
+
+        // 3) contexto de chave → campos relevantes ao kind do documento.
         const w = model.getWordUntilPosition(position);
         const range = {
           startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
           startColumn: w.startColumn, endColumn: w.endColumn,
         };
-        return { suggestions: items.map((it) => ({ ...it, range })) };
+        return { suggestions: keyItems(docKindAt(model, position.lineNumber), range) };
       },
     });
   }
