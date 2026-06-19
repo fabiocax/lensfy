@@ -6,6 +6,7 @@ from app.api.routes import (
     clusters,
     crds,
     deployments,
+    discovery,
     helm,
     impact,
     logs,
@@ -34,6 +35,7 @@ api_router.include_router(
 api_router.include_router(helm.router, prefix="/helm", tags=["helm"])
 api_router.include_router(security.router, prefix="/security", tags=["security"])
 api_router.include_router(crds.router, prefix="/crds", tags=["crds"])
+api_router.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
 api_router.include_router(capacity.router, prefix="/capacity", tags=["capacity"])
 api_router.include_router(impact.router, prefix="/impact", tags=["impact"])
 api_router.include_router(

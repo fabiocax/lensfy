@@ -38,7 +38,8 @@ A interface é um **PWA instalável**, servida pelo próprio backend (FastAPI + 
 
 ### Explorer de recursos
 - Árvore com **Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services, Ingress, NetworkPolicies, ConfigMaps, Secrets, PVC, StorageClasses, Namespaces, Nodes, Events, RBAC** (roles/bindings), **LimitRanges** e **ResourceQuotas**.
-- **CRDs / Custom Resources:** descoberta dinâmica de qualquer CRD instalado (ArgoCD, cert-manager, Istio…), agrupada por API group, com drill-down nas instâncias e visualização de YAML.
+- **Descoberta automática de recursos:** a árvore lateral lista **todos os tipos de recurso servidos pelo cluster** (não só os fixos) via *API discovery* — qualquer CRD instalado (Istio **Gateway/VirtualService**, **Gateway API** HTTPRoute, cert-manager, ArgoCD, Prometheus Operator…) aparece sozinho, agrupado por API group, com listagem de instâncias e YAML. Os tipos já cobertos pelas views dedicadas não são duplicados.
+- **CRDs / Custom Resources:** view dedicada que lista as CRDs instaladas (grupo, kind, escopo, versões) com drill-down nas instâncias.
 - **Tabelas ao vivo** (`/ws/watch`): criação/remoção de pods, status e restarts se atualizam sozinhos — reconciliação incremental **sem flicker** (seleção e scroll preservados).
 - **Filtro global de namespace** multi-seleção (estilo Lens) e **busca global / command palette** (foco com `/`).
 - **Painel de detalhes (drawer)** por recurso: resumo, metadados, status, containers (estado/restarts/imagens), condições, **métricas ao vivo** (CPU/mem) e eventos.

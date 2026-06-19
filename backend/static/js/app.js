@@ -12,6 +12,8 @@
     view: 'dashboard',
     selectedNs: [], // namespaces filtrados (vazio = todos), multi-seleção
     namespaces: [], // namespaces do cluster atual (para o seletor)
+    discovered: [], // grupos de tipos descobertos dinamicamente (CRDs etc.)
+    discoveredMap: {}, // id 'dyn:apiVersion:Kind' -> descritor do recurso
     viewSocket: null, // WebSocket vivo da view atual (métricas/eventos)
     viewTimer: null, // timer de polling da view atual (métricas top)
     viewWatchTimer: null, // debounce de re-render do watch ao vivo
@@ -288,6 +290,7 @@
     renderClusters();
     renderTree();
     loadNamespaces();
+    loadDiscovery();
     renderView();
     restoreDock(current(), dock); // restaura o ponto onde parei (entre recargas)
   }
@@ -628,6 +631,7 @@
     renderClusters();
     renderTree();
     loadNamespaces();
+    loadDiscovery();
     renderView();
     restoreDock(current(), dock); // reabre as abas onde parei neste cluster
   }
@@ -841,9 +845,11 @@
     const tree = $('#resource-tree');
     tree.innerHTML = '';
     const hasCluster = !!current();
-    TREE.forEach((grp) => {
-      tree.appendChild(el(`<div class="tree-group-title">${esc(grp.group)}</div>`));
-      grp.items.forEach((it) => {
+    const addGroup = (title, items, extraTitle) => {
+      const t = el(`<div class="tree-group-title">${esc(title)}</div>`);
+      if (extraTitle) t.title = extraTitle;
+      tree.appendChild(t);
+      items.forEach((it) => {
         const disabled = !hasCluster;
         const node = el(
           `<div class="tree-item ${it.id === state.view ? 'active' : ''} ${disabled ? 'disabled' : ''}">` +
@@ -859,7 +865,71 @@
         }
         tree.appendChild(node);
       });
+    };
+    TREE.forEach((grp) => addGroup(grp.group, grp.items));
+    // Grupos descobertos dinamicamente (CRDs e tipos não-curados do cluster).
+    (state.discovered || []).forEach((grp) => addGroup(grp.label, grp.items, grp.group));
+  }
+
+  // Kinds já cobertos pela árvore curada (com views dedicadas) — não duplicar.
+  const CURATED_KINDS = new Set([
+    'Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'Service',
+    'Ingress', 'NetworkPolicy', 'ConfigMap', 'Secret', 'PersistentVolumeClaim',
+    'StorageClass', 'Namespace', 'Node', 'Event', 'LimitRange', 'ResourceQuota',
+    'Role', 'ClusterRole', 'RoleBinding', 'ClusterRoleBinding',
+  ]);
+  // Rótulo amigável para um API group.
+  function groupLabel(group) {
+    if (!group) return 'Core (extras)';
+    const KNOWN = {
+      'networking.istio.io': 'Istio · Networking',
+      'security.istio.io': 'Istio · Security',
+      'gateway.networking.k8s.io': 'Gateway API',
+      'cert-manager.io': 'cert-manager',
+      'argoproj.io': 'Argo',
+      'monitoring.coreos.com': 'Prometheus Operator',
+      'apiextensions.k8s.io': 'CRDs',
+    };
+    return KNOWN[group] || group;
+  }
+  const GROUP_ICON = {
+    'gateway.networking.k8s.io': 'fa-door-open', 'networking.istio.io': 'fa-diagram-project',
+    'cert-manager.io': 'fa-certificate', 'argoproj.io': 'fa-code-branch',
+    'monitoring.coreos.com': 'fa-chart-line',
+  };
+
+  // Descobre dinamicamente os tipos de recurso do cluster e monta os grupos
+  // extras da árvore (Gateway, VirtualService, etc.) — exclui os já curados.
+  async function loadDiscovery() {
+    const cur = current();
+    state.discovered = [];
+    state.discoveredMap = {};
+    if (!cur) return renderTree();
+    let data;
+    try {
+      data = await api(`/discovery?cluster_id=${cur.id}`);
+    } catch (_) {
+      return; // best-effort: a árvore curada continua funcionando
+    }
+    if (current() !== cur) return; // troca rápida de cluster
+    const groups = [];
+    (data.groups || []).forEach((g) => {
+      const items = g.resources
+        .filter((r) => !CURATED_KINDS.has(r.kind))
+        .map((r) => {
+          const id = `dyn:${r.apiVersion}:${r.kind}`;
+          state.discoveredMap[id] = {
+            apiVersion: r.apiVersion, kind: r.kind, namespaced: r.namespaced,
+            name: r.name, group: r.group,
+          };
+          return { id, label: r.kind, icon: GROUP_ICON[r.group] || 'fa-cube' };
+        });
+      if (items.length) groups.push({ group: g.group, label: groupLabel(g.group), items });
     });
+    state.discovered = groups;
+    renderTree();
+    // Sessão restaurada num recurso dinâmico: agora que o mapa existe, renderiza.
+    if (state.view.startsWith('dyn:') && state.discoveredMap[state.view]) renderView();
   }
 
   // ---------- views ----------
@@ -912,6 +982,7 @@
       if (state.view === 'capacity') return await viewCapacity(cur);
       if (state.view === 'impact') return await viewImpact(cur);
       if (state.view === 'crds') return await viewCRDs(cur);
+      if (state.view.startsWith('dyn:')) return await viewDiscovered(cur);
       if (state.view === 'metrics') return await viewMetrics(cur);
       if (state.view === 'pods') return await viewPods(cur);
       if (state.view === 'deployments') return await viewDeployments(cur);
@@ -1972,6 +2043,60 @@
         const q = `cluster_id=${cur.id}&group=${encodeURIComponent(crd.group)}&version=${encodeURIComponent(crd.version)}&plural=${encodeURIComponent(crd.plural)}&name=${encodeURIComponent(name)}` + (ns ? `&namespace=${encodeURIComponent(ns)}` : '');
         try {
           const r = await api(`/crds/manifest?${q}`);
+          box.innerHTML = `<pre style="margin:0;white-space:pre;font-size:12px;line-height:1.5">${esc(r.yaml)}</pre>`;
+        } catch (e) {
+          box.innerHTML = `<p style="color:var(--color-danger)">${esc(e.message)}</p>`;
+        }
+      },
+    });
+  }
+
+  // ---------- recursos descobertos dinamicamente (Gateway, VirtualService…) ----------
+  async function viewDiscovered(cur) {
+    const desc = state.discoveredMap[state.view];
+    if (!desc) return emptyState('fa-cube', 'Recurso não encontrado', 'Recarregue para atualizar a descoberta do cluster.');
+    $('#view-title').textContent = desc.kind;
+    loading();
+    const namespaced = desc.namespaced;
+    const nsParam = (namespaced && state.selectedNs.length === 1)
+      ? `&namespace=${encodeURIComponent(state.selectedNs[0])}` : '';
+    let data;
+    try {
+      data = await api(
+        `/discovery/instances?cluster_id=${cur.id}` +
+        `&apiVersion=${encodeURIComponent(desc.apiVersion)}&kind=${encodeURIComponent(desc.kind)}${nsParam}`
+      );
+    } catch (e) {
+      return emptyState('fa-circle-exclamation', `Erro ao listar ${desc.kind}`, e.message);
+    }
+    if (state.view !== `dyn:${desc.apiVersion}:${desc.kind}` || state.currentId !== cur.id) return;
+    setActions(`<span class="bulk-count">${esc(desc.apiVersion)}</span>`);
+    const rows = (data.rows || []).filter((r) => !namespaced || !r.namespace || nsMatch(r.namespace));
+    if (!rows.length) return emptyState('fa-cube', `Nenhum ${desc.kind}`, 'Nenhuma instância encontrada.');
+    const body = rows.map((r) =>
+      `<tr data-name="${esc(r.name)}" data-ns="${esc(r.namespace || '')}" style="cursor:pointer">` +
+      `<td><b>${esc(r.name)}</b></td>${namespaced ? `<td><span class="badge">${esc(r.namespace || '')}</span></td>` : ''}` +
+      `<td>${esc(r.age || '')}</td></tr>`).join('');
+    $('#view-body').innerHTML =
+      `<div class="dash-card"><h3 style="margin:0 0 var(--space-2)"><i class="fas fa-cube"></i> ` +
+      `${esc(desc.kind)} <span class="log-count">(${rows.length})</span></h3>` +
+      `<table class="data-table"><thead><tr><th>Nome</th>${namespaced ? '<th>Namespace</th>' : ''}<th>Idade</th></tr></thead>` +
+      `<tbody>${body}</tbody></table></div>`;
+    $('#view-body').querySelectorAll('tr[data-name]').forEach((tr) =>
+      tr.addEventListener('click', () => openDynamicYaml(cur, desc, tr.dataset.name, tr.dataset.ns || '')));
+  }
+  function openDynamicYaml(cur, desc, name, ns) {
+    uiModal({
+      title: `${desc.kind}: ${name}`, icon: 'fa-file-code', width: 'min(820px,96vw)',
+      body: '<div id="dyn-yaml" style="max-height:60vh;overflow:auto"><div class="empty-state" style="height:120px"><div class="spinner"></div></div></div>',
+      actions: [{ label: 'Fechar', cls: 'btn-primary', primary: true, value: 'ok' }],
+      onOpen: async (bd) => {
+        const box = bd.querySelector('#dyn-yaml');
+        const q = `cluster_id=${cur.id}&apiVersion=${encodeURIComponent(desc.apiVersion)}` +
+          `&kind=${encodeURIComponent(desc.kind)}&name=${encodeURIComponent(name)}` +
+          (ns ? `&namespace=${encodeURIComponent(ns)}` : '');
+        try {
+          const r = await api(`/discovery/manifest?${q}`);
           box.innerHTML = `<pre style="margin:0;white-space:pre;font-size:12px;line-height:1.5">${esc(r.yaml)}</pre>`;
         } catch (e) {
           box.innerHTML = `<p style="color:var(--color-danger)">${esc(e.message)}</p>`;

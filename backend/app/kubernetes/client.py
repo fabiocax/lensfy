@@ -2020,6 +2020,91 @@ class KubernetesClient:
 
         return self._guard(f"get {plural}/{name}", _do)
 
+    # --- API discovery (todos os tipos de recurso, incl. CRDs) -----------
+
+    def discover_resources(self) -> dict:
+        """Enumerate every listable resource type served by the cluster — built-in
+        AND installed CRDs (Istio Gateway/VirtualService, Gateway API, cert-manager,
+        ArgoCD, …) — grouped by API group. Backs the dynamic Explorer tree.
+
+        Returns ``{groups:[{group, resources:[{kind,name,apiVersion,group,
+        namespaced,shortNames,preferred}]}], total}`` (one entry per group/kind,
+        preferring the served/preferred version). Cached briefly.
+        """
+
+        def _do():
+            best: dict[tuple, dict] = {}
+            for r in self._dyn().resources.search():
+                name = getattr(r, "name", "") or ""
+                if not name or "/" in name:  # pula subrecursos (pods/status, …)
+                    continue
+                verbs = getattr(r, "verbs", None) or []
+                if "list" not in verbs:  # só o que dá para listar
+                    continue
+                kind = getattr(r, "kind", None)
+                if not kind:
+                    continue
+                group = getattr(r, "group", "") or ""
+                entry = {
+                    "kind": kind, "name": name,
+                    "apiVersion": r.group_version,  # "grupo/versão" ou "v1"
+                    "group": group,
+                    "namespaced": bool(getattr(r, "namespaced", False)),
+                    "shortNames": list(getattr(r, "short_names", None) or []),
+                    "preferred": bool(getattr(r, "preferred", False)),
+                }
+                key = (group, kind)
+                cur = best.get(key)
+                if cur is None or (entry["preferred"] and not cur["preferred"]):
+                    best[key] = entry
+
+            grouped: dict[str, list] = {}
+            for entry in best.values():
+                grouped.setdefault(entry["group"], []).append(entry)
+            groups = [
+                {"group": g, "resources": sorted(items, key=lambda e: e["kind"])}
+                for g, items in sorted(grouped.items())
+            ]
+            return {"groups": groups, "total": len(best)}
+
+        return self._cached("discovery", 60.0, lambda: self._guard("discover resources", _do))
+
+    def list_resource_dynamic(
+        self, api_version: str, kind: str, namespace: str | None = None
+    ) -> dict:
+        """Generic list (name/namespace/age) of ANY resource by apiVersion+kind,
+        via the dynamic client — works for built-ins and CRDs alike."""
+
+        def _do():
+            res = self._dyn().resources.get(api_version=api_version, kind=kind)
+            ns = namespace if (namespace and res.namespaced) else None
+            data = res.get(namespace=ns).to_dict()
+            rows = []
+            for it in data.get("items", []):
+                meta = it.get("metadata", {}) or {}
+                rows.append({
+                    "name": meta.get("name"),
+                    "namespace": meta.get("namespace"),
+                    "age": _short_age(_parse_ts(meta.get("creationTimestamp"))),
+                })
+            rows.sort(key=lambda r: (r.get("namespace") or "", r.get("name") or ""))
+            return {"apiVersion": api_version, "kind": kind,
+                    "namespaced": res.namespaced, "rows": rows, "total": len(rows)}
+
+        return self._guard(f"list {kind}", _do)
+
+    def get_manifest_dynamic(
+        self, api_version: str, kind: str, name: str, namespace: str | None = None
+    ) -> str:
+        """Fetch any resource (built-in or CRD) as YAML by apiVersion+kind."""
+
+        def _do():
+            res = self._dyn().resources.get(api_version=api_version, kind=kind)
+            ns = namespace if res.namespaced else None
+            return self._to_yaml(res.get(name=name, namespace=ns).to_dict())
+
+        return self._guard(f"get {kind}/{name}", _do)
+
     # --- capacity & rightsizing ------------------------------------------
 
     def capacity(self) -> dict:

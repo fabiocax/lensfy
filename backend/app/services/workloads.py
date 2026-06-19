@@ -290,6 +290,25 @@ class WorkloadService:
         except KubernetesError as exc:
             raise WorkloadServiceError(str(exc)) from exc
 
+    # --- descoberta dinâmica de tipos de recurso (incl. CRDs) ---
+    def discover_resources(self, cluster_id):
+        try:
+            return self._client(cluster_id).discover_resources()
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    def list_resource_dynamic(self, cluster_id, api_version, kind, namespace=None):
+        try:
+            return self._client(cluster_id).list_resource_dynamic(api_version, kind, namespace)
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    def get_manifest_dynamic(self, cluster_id, api_version, kind, name, namespace=None):
+        try:
+            return self._client(cluster_id).get_manifest_dynamic(api_version, kind, name, namespace)
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
     # --- capacidade & rightsizing ---
     def capacity(self, cluster_id):
         try:
