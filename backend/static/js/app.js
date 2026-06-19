@@ -5952,16 +5952,60 @@ spec:
     $('#onb-enter').addEventListener('click', () => {
       scr.hidden = true;
       loadClusters(); // só agora a SPA começa a falar com a API (já com token)
+      checkForUpdate();
+    });
+  }
+
+  // ---------- aviso de atualização disponível ----------
+  async function checkForUpdate() {
+    let d;
+    try {
+      d = await api('/update/status');
+    } catch (_) {
+      return; // best-effort: nunca atrapalha o uso
+    }
+    if (!d || !d.available) return;
+    try {
+      if (localStorage.getItem('lensfy.update.dismissed') === d.latest) return; // já dispensado
+    } catch (_) {}
+    showUpdateBanner(d);
+  }
+
+  function showUpdateBanner(d) {
+    const bar = $('#update-banner');
+    if (!bar) return;
+    const ver = d.latest
+      ? ` (<b>${esc(d.latest)}</b>${d.current ? ` · atual ${esc(d.current)}` : ''})`
+      : '';
+    const msg = d.latest_message ? ` <span class="upd-msg">${esc(d.latest_message)}</span>` : '';
+    const link = d.latest_url
+      ? ` <a href="${esc(d.latest_url)}" target="_blank" rel="noopener">ver no GitHub</a>`
+      : '';
+    bar.innerHTML =
+      `<i class="fas fa-circle-arrow-up"></i> <span>Nova versão do Lensfy disponível${ver}.${msg} ` +
+      `Atualize com <code>lensfy update</code>.${link}</span>` +
+      `<span class="upd-spacer"></span>` +
+      `<button class="upd-x" title="Dispensar" aria-label="Dispensar">&times;</button>`;
+    bar.hidden = false;
+    bar.querySelector('.upd-x').addEventListener('click', () => {
+      bar.hidden = true;
+      try {
+        localStorage.setItem('lensfy.update.dismissed', d.latest || '');
+      } catch (_) {}
     });
   }
 
   async function boot() {
     bind();
-    if (!window.LENSFY_AUTH) return loadClusters(); // segurança desligada
+    if (!window.LENSFY_AUTH) {
+      loadClusters(); // segurança desligada
+      return checkForUpdate();
+    }
     const token = await loadDeviceToken();
     if (token) {
       DEVICE_TOKEN = token;
       loadClusters();
+      checkForUpdate();
     } else {
       showOnboarding(); // ainda sem token neste equipamento
     }

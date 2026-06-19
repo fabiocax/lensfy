@@ -16,6 +16,7 @@ from app.api.routes import (
     portforward,
     resources,
     security,
+    update,
 )
 
 api_router = APIRouter()
@@ -39,6 +40,7 @@ api_router.include_router(
     multicluster.router, prefix="/multicluster", tags=["multicluster"]
 )
 api_router.include_router(ai.router, prefix="/ai", tags=["ai"])
+api_router.include_router(update.router, prefix="/update", tags=["update"])
 api_router.include_router(
     onboarding.router, prefix="/onboarding", tags=["onboarding"]
 )

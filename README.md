@@ -93,6 +93,7 @@ Busca **reversa** de dependências — responde perguntas que a API do Kubernete
 
 ### Plataforma
 - **Segurança local sem login:** acesso só de *loopback*, *allowlist* de Host (anti DNS-rebinding) e **token de dispositivo**; tela de **onboarding** gera o token na primeira execução.
+- **Aviso de atualização:** a interface mostra um banner (dispensável) quando há uma versão mais recente no GitHub — compara o commit instalado (`source_ref`/HEAD) com o último commit do branch de release. Aplique com `lensfy update`. Checagem *best-effort* e cacheada; desligável via `LENSFY_UPDATE_CHECK_ENABLED=false`.
 - **PWA instalável** com app shell offline.
 
 ---
@@ -234,6 +235,9 @@ Todas com prefixo `LENSFY_`. Veja `backend/.env.example` (copie para `backend/.e
 | `LENSFY_ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Modelo do assistente. |
 | `LENSFY_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Endpoint da API (override p/ proxy/gateway). |
 | `LENSFY_AI_ALLOW_MUTATIONS` | `false` | `true` permite ações que alteram o cluster (cada uma ainda exige aprovação na UI). Padrão: só diagnostica. |
+| `LENSFY_UPDATE_CHECK_ENABLED` | `true` | Checa o GitHub por novas versões e mostra o banner de atualização. `false` desativa (sem chamada externa). |
+| `LENSFY_UPDATE_REPO` | `fabiocax/lensfy` | Repositório (owner/repo) consultado para a checagem de atualização. |
+| `LENSFY_UPDATE_BRANCH` | `main` | Branch de release comparado na checagem. |
 
 Exemplos:
 

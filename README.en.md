@@ -93,6 +93,7 @@ The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2
 
 ### Platform
 - **Local security with no login:** loopback-only access, a Host *allowlist* (anti DNS-rebinding), and a **device token**; an **onboarding** screen generates the token on first run.
+- **Update notice:** the UI shows a (dismissible) banner when a newer version is on GitHub — it compares the installed commit (`source_ref`/HEAD) with the latest commit on the release branch. Apply it with `lensfy update`. The check is best-effort and cached; disable via `LENSFY_UPDATE_CHECK_ENABLED=false`.
 - **Installable PWA** with an offline app shell.
 
 ---
@@ -234,6 +235,9 @@ All prefixed with `LENSFY_`. See `backend/.env.example` (copy it to `backend/.en
 | `LENSFY_ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Assistant model. |
 | `LENSFY_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API endpoint (override for a proxy/gateway). |
 | `LENSFY_AI_ALLOW_MUTATIONS` | `false` | `true` allows cluster-changing actions (each still needs UI approval). Default: diagnose-only. |
+| `LENSFY_UPDATE_CHECK_ENABLED` | `true` | Check GitHub for new versions and show the update banner. `false` disables it (no outbound call). |
+| `LENSFY_UPDATE_REPO` | `fabiocax/lensfy` | Repository (owner/repo) queried for the update check. |
+| `LENSFY_UPDATE_BRANCH` | `main` | Release branch compared during the check. |
 
 Examples:
 

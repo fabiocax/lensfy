@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # Opt-in: a destructive capability must not be on by default.
     ai_allow_mutations: bool = False
 
+    # Update check: compares the installed git ref against the latest commit on
+    # GitHub so the UI can show an "update available" notice. Best-effort and
+    # cached; disable to avoid the outbound call to api.github.com.
+    update_check_enabled: bool = True
+    update_repo: str = "fabiocax/lensfy"  # owner/repo on GitHub
+    update_branch: str = "main"
+
     @field_validator("cors_origins", "allowed_hosts", mode="before")
     @classmethod
     def _split_list(cls, v):
