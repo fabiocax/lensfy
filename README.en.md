@@ -4,7 +4,7 @@
 
 > **Local Kubernetes cluster manager** — an open-source alternative to Lens/OpenLens that runs entirely on your machine, with no mandatory external services.
 
-Multi-cluster, real-time logs and metrics, integrated terminal/`exec`, a `kubectl` shell, port-forward, manifest and Helm deploys, a YAML editor (Monaco) with version history, and an **AI assistant** (Claude API) that diagnoses problems and runs cluster operations — always with approval.
+Multi-cluster, real-time logs and metrics, integrated terminal/`exec`, a `kubectl` shell, port-forward, manifest and Helm deploys, a YAML editor (Monaco) with version history, **security and RBAC auditing**, **capacity planning/rightsizing**, **global cross-cluster search**, **CRDs**, and an **AI assistant** (Claude API) that diagnoses problems and runs cluster operations — always with approval.
 
 The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2 + vanilla JS/CSS — **no build step, no npm**). Access is restricted to the local machine and protected by a **device token** (no login/password).
 
@@ -33,9 +33,12 @@ The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2
 - **Import from Google Cloud (GKE):** the **gcloud** tab lists projects and clusters and runs `get-credentials` for you (requires `gcloud` + `gke-gcloud-auth-plugin`).
 - **Cluster switcher** with search, per-item status/version, one-click switching, **drag-to-reorder**, and removal. Importing never blocks the UI (clusters come up in the background).
 - **Per-cluster session:** when you return to a cluster, Lensfy restores where you left off — the view, the namespace filter, and the open dock tabs (logs/console/YAML/AI).
+- **Global cross-cluster search:** find resources by name across **all** clusters at once, in parallel (unreachable clusters become a warning rather than failing the search); clicking a result switches cluster and opens the resource.
+- **Cluster comparison** side by side (version, nodes, pods, deployments, usage) and an exportable **inventory** per cluster (counts per kind + pods per namespace).
 
 ### Resource explorer
-- A tree with **Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services, Ingress, ConfigMaps, Secrets, PVC, StorageClasses, Namespaces, Nodes, Events, RBAC** (roles/bindings), **LimitRanges**, and **ResourceQuotas**.
+- A tree with **Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services, Ingress, NetworkPolicies, ConfigMaps, Secrets, PVC, StorageClasses, Namespaces, Nodes, Events, RBAC** (roles/bindings), **LimitRanges**, and **ResourceQuotas**.
+- **CRDs / Custom Resources:** dynamic discovery of any installed CRD (ArgoCD, cert-manager, Istio…), grouped by API group, with drill-down into instances and YAML viewing.
 - **Live tables** (`/ws/watch`): pod creation/removal, status, and restarts update on their own — incremental reconciliation **without flicker** (selection and scroll preserved).
 - **Global namespace filter** with multi-select (Lens-style) and a **global search / command palette** (focus with `/`).
 - **Detail panel (drawer)** per resource: summary, metadata, status, containers (state/restarts/images), conditions, **live metrics** (CPU/mem), and events.
@@ -46,6 +49,13 @@ The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2
 - **Problems:** a cluster scan that lists issues by category and severity (CrashLoop, ImagePull, OOMKilled, pending, unbound PVC, nodes under pressure/cordoned, etc.).
 - **Resources & Quotas:** sum of requests/limits per namespace, `ResourceQuota` used/limit, and containers **without requests/limits** (OOM/SLA risk).
 - **Traffic map:** **Ingress → Service → Workload → Pods** topology rendered as SVG, with zoom/pan.
+- **Capacity:** per node, allocatable vs. *requests* vs. live usage (scheduling headroom), with cluster totals and pod counts per node.
+- **Rightsizing:** compares *requests/limits* to live usage (metrics-server) and recommends adjustments, flagging over/under-provisioning and OOM risk.
+
+### Security & RBAC
+- **Security scan (PSS-style):** detects `privileged` pods/containers, `hostNetwork/hostPID/hostIPC`, `hostPath` volumes, `runAsRoot`, dangerous *capabilities*, **missing limits**, mutable image tags, and auto-mounted SA tokens — grouped by rule/severity, with a **0–100 score**.
+- **"Who can do what":** aggregates every RBAC subject (User/Group/ServiceAccount) and the verbs/resources granted by its bound roles, flagging **cluster-admins**.
+- **`can-i` simulator:** authoritative permission check (SubjectAccessReview) for the current credential or a specific ServiceAccount/user.
 
 ### Real time (terminal, logs, console)
 - **Live logs:** filter, auto-scroll, copy, download, and container selector.
@@ -68,7 +78,7 @@ The UI is an **installable PWA**, served by the backend itself (FastAPI + Jinja2
 - **Helm:** releases, install/upgrade/rollback, and uninstall.
 
 ### AI assistant (optional)
-- An SRE agent on the **Claude API** (Messages API, via `httpx` — no extra SDK): **read-only** tools (overview, list/view resources, logs, top) run automatically; **cluster-changing actions** (scale/restart/delete/cordon/drain/rollback/cronjob) require **Approve/Deny** in the UI.
+- An SRE agent on the **Claude API** (Messages API, via `httpx` — no extra SDK): **read-only** tools (overview, list/view resources, logs, top, **security scan, RBAC `can-i`, capacity, rightsizing, and CRDs**) run automatically; **cluster-changing actions** (scale/restart/delete/cordon/drain/rollback/cronjob) require **Approve/Deny** in the UI.
 - It can be limited to diagnose-only (`LENSFY_AI_ALLOW_MUTATIONS=false`), and diagnoses can be **saved as reports**.
 
 ### Platform
@@ -289,6 +299,7 @@ lensfy/
     ├── app/
     │   ├── api/          # REST routes (/api): clusters, pods, deployments,
     │   │                 #   resources, logs, metrics, helm, portforward,
+    │   │                 #   security, crds, capacity, multicluster,
     │   │                 #   ai, onboarding
     │   ├── websocket/    # real-time channels (/ws): logs, terminal,
     │   │                 #   watch, events, metrics, ai, kubectl

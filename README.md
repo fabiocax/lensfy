@@ -4,7 +4,7 @@
 
 > **Gerenciador local de clusters Kubernetes** — uma alternativa open-source ao Lens/OpenLens que roda inteiramente na sua máquina, sem serviços externos obrigatórios.
 
-Multi-cluster, logs e métricas em tempo real, terminal/`exec` integrado, shell `kubectl`, port-forward, deploy de manifestos e Helm, editor YAML (Monaco) com histórico de versões e um **assistente de IA** (Claude API) que diagnostica problemas e executa operações no cluster — sempre com aprovação.
+Multi-cluster, logs e métricas em tempo real, terminal/`exec` integrado, shell `kubectl`, port-forward, deploy de manifestos e Helm, editor YAML (Monaco) com histórico de versões, **auditoria de segurança e RBAC**, **planejamento de capacidade/rightsizing**, **busca global entre clusters**, **CRDs** e um **assistente de IA** (Claude API) que diagnostica problemas e executa operações no cluster — sempre com aprovação.
 
 A interface é um **PWA instalável**, servida pelo próprio backend (FastAPI + Jinja2 + JS/CSS vanilla — **sem build step, sem npm**). O acesso fica restrito à máquina local e é protegido por um **token de dispositivo** (sem login/senha).
 
@@ -33,9 +33,12 @@ A interface é um **PWA instalável**, servida pelo próprio backend (FastAPI + 
 - **Importar do Google Cloud (GKE):** a aba **gcloud** lista projetos e clusters e roda `get-credentials` por você (requer `gcloud` + `gke-gcloud-auth-plugin`).
 - **Seletor de clusters** com busca, status/versão por item, troca em um clique, **reordenação por arrastar** e remoção. Importar nunca trava a UI (clusters sobem em segundo plano).
 - **Sessão por cluster:** ao voltar a um cluster, o Lensfy restaura onde você parou — view, filtro de namespace e abas abertas no dock (logs/console/YAML/IA).
+- **Busca global entre clusters:** procura recursos por nome em **todos** os clusters de uma vez, em paralelo (clusters inacessíveis viram aviso, não interrompem a busca); clicar em um resultado troca de cluster e abre o recurso.
+- **Comparação de clusters** lado a lado (versão, nós, pods, deployments, uso) e **inventário** exportável por cluster (contagem por tipo + pods por namespace).
 
 ### Explorer de recursos
-- Árvore com **Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services, Ingress, ConfigMaps, Secrets, PVC, StorageClasses, Namespaces, Nodes, Events, RBAC** (roles/bindings), **LimitRanges** e **ResourceQuotas**.
+- Árvore com **Pods, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services, Ingress, NetworkPolicies, ConfigMaps, Secrets, PVC, StorageClasses, Namespaces, Nodes, Events, RBAC** (roles/bindings), **LimitRanges** e **ResourceQuotas**.
+- **CRDs / Custom Resources:** descoberta dinâmica de qualquer CRD instalado (ArgoCD, cert-manager, Istio…), agrupada por API group, com drill-down nas instâncias e visualização de YAML.
 - **Tabelas ao vivo** (`/ws/watch`): criação/remoção de pods, status e restarts se atualizam sozinhos — reconciliação incremental **sem flicker** (seleção e scroll preservados).
 - **Filtro global de namespace** multi-seleção (estilo Lens) e **busca global / command palette** (foco com `/`).
 - **Painel de detalhes (drawer)** por recurso: resumo, metadados, status, containers (estado/restarts/imagens), condições, **métricas ao vivo** (CPU/mem) e eventos.
@@ -46,6 +49,13 @@ A interface é um **PWA instalável**, servida pelo próprio backend (FastAPI + 
 - **Problemas:** varredura que lista issues por categoria e severidade (CrashLoop, ImagePull, OOMKilled, pendentes, PVC não vinculado, nós com pressão/cordon, etc.).
 - **Recursos & Cotas:** soma de requests/limits por namespace, `ResourceQuota` usado/limite e containers **sem requests/limits** (risco de OOM/SLA).
 - **Mapa de tráfego:** topologia **Ingress → Service → Workload → Pods** em SVG, com zoom/pan.
+- **Capacidade:** por nó, alocável vs. *requests* vs. uso real (folga de agendamento) com totais do cluster e contagem de pods por nó.
+- **Rightsizing:** compara *requests/limits* ao uso real (metrics-server) e recomenda ajustes, sinalizando super/subdimensionamento e risco de OOM.
+
+### Segurança & RBAC
+- **Varredura de segurança (PSS-style):** detecta pods/containers `privileged`, `hostNetwork/hostPID/hostIPC`, volumes `hostPath`, `runAsRoot`, *capabilities* perigosas, **sem limits**, tag de imagem mutável e token de SA auto-montado — agrupada por regra/severidade, com **score 0–100**.
+- **"Quem pode o quê":** agrega todo sujeito RBAC (User/Group/ServiceAccount) e os verbos/recursos concedidos pelos roles vinculados, sinalizando **cluster-admins**.
+- **Simulador `can-i`:** checagem autoritativa de permissão (SubjectAccessReview) para a credencial atual ou um ServiceAccount/usuário específico.
 
 ### Tempo real (terminal, logs, console)
 - **Logs ao vivo:** filtro, auto-scroll, copiar, baixar e seletor de container.
@@ -68,7 +78,7 @@ A interface é um **PWA instalável**, servida pelo próprio backend (FastAPI + 
 - **Helm:** releases, install/upgrade/rollback e uninstall.
 
 ### Assistente de IA (opcional)
-- Agente SRE sobre a **Claude API** (Messages API, via `httpx` — sem SDK extra): ferramentas **read-only** (visão geral, listar/ver recursos, logs, top) rodam automaticamente; **ações que alteram o cluster** (escalar/restart/excluir/cordon/drain/rollback/cronjob) exigem **Aprovar/Negar** na UI.
+- Agente SRE sobre a **Claude API** (Messages API, via `httpx` — sem SDK extra): ferramentas **read-only** (visão geral, listar/ver recursos, logs, top, **varredura de segurança, RBAC `can-i`, capacidade, rightsizing e CRDs**) rodam automaticamente; **ações que alteram o cluster** (escalar/restart/excluir/cordon/drain/rollback/cronjob) exigem **Aprovar/Negar** na UI.
 - Pode ser limitado a só diagnosticar (`LENSFY_AI_ALLOW_MUTATIONS=false`) e os diagnósticos podem ser **salvos como relatórios**.
 
 ### Plataforma
@@ -289,6 +299,7 @@ lensfy/
     ├── app/
     │   ├── api/          # rotas REST (/api): clusters, pods, deployments,
     │   │                 #   resources, logs, metrics, helm, portforward,
+    │   │                 #   security, crds, capacity, multicluster,
     │   │                 #   ai, onboarding
     │   ├── websocket/    # canais em tempo real (/ws): logs, terminal,
     │   │                 #   watch, events, metrics, ai, kubectl

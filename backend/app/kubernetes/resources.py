@@ -254,6 +254,24 @@ RESOURCES: dict[str, ResourceDef] = {
             "age": age(o.metadata.creation_timestamp),
         },
     ),
+    "networkpolicies": ResourceDef(
+        namespaced=True,
+        columns=[("name", "Nome"), ("namespace", "Namespace"),
+                 ("pod_selector", "Pod Selector"), ("types", "Tipos"), ("age", "Idade")],
+        list_fn=lambda c, ns: (
+            c._net.list_namespaced_network_policy(ns).items if ns
+            else c._net.list_network_policy_for_all_namespaces().items),
+        row_fn=lambda o: {
+            "name": o.metadata.name,
+            "namespace": o.metadata.namespace,
+            "pod_selector": ", ".join(
+                f"{k}={v}" for k, v in ((o.spec.pod_selector.match_labels or {})
+                                        if o.spec and o.spec.pod_selector else {}).items()
+            ) or "<todos>",
+            "types": ", ".join(o.spec.policy_types or []) if o.spec else "-",
+            "age": age(o.metadata.creation_timestamp),
+        },
+    ),
     # ---- Config ----
     "configmaps": ResourceDef(
         namespaced=True,
@@ -418,6 +436,7 @@ MANIFEST_KINDS: dict[str, tuple[str, str, bool]] = {
     "cronjobs": ("batch/v1", "CronJob", True),
     "services": ("v1", "Service", True),
     "ingress": ("networking.k8s.io/v1", "Ingress", True),
+    "networkpolicies": ("networking.k8s.io/v1", "NetworkPolicy", True),
     "configmaps": ("v1", "ConfigMap", True),
     "secrets": ("v1", "Secret", True),
     "pvc": ("v1", "PersistentVolumeClaim", True),

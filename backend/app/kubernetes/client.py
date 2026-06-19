@@ -116,6 +116,17 @@ def _mem_mib(value: str | None) -> int:
         return 0
 
 
+def _parse_ts(value):
+    """Parse an ISO-8601 timestamp string (raw API objects carry strings, not
+    datetimes) into a tz-aware datetime, or return it unchanged if already one."""
+    if value is None or isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
 def _short_age(ts) -> str | None:
     """Compact uptime/age string from a tz-aware datetime (e.g. '3d2h', '5m')."""
     if not ts:
@@ -790,6 +801,7 @@ class KubernetesClient:
         "services": ("_core", "service"), "configmaps": ("_core", "config_map"),
         "secrets": ("_core", "secret"), "pvc": ("_core", "persistent_volume_claim"),
         "ingress": ("_net", "ingress"), "events": ("_core", "event"),
+        "networkpolicies": ("_net", "network_policy"),
         "limitranges": ("_core", "limit_range"),
         "resourcequotas": ("_core", "resource_quota"),
         "nodes": ("_core", "node"), "namespaces": ("_core", "namespace"),
@@ -1558,6 +1570,424 @@ class KubernetesClient:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("falha ao remover pod %s/%s: %s", namespace, name, exc)
+
+    # --- RBAC (quem pode o quê + simulador can-i) ------------------------
+
+    def rbac_subjects(self) -> dict:
+        """Aggregate RBAC: every subject (User/Group/ServiceAccount) and the
+        roles bound to it (Role/ClusterRoleBindings), with the union of the
+        verbs/resources those roles grant. Backs the "quem pode o quê" view.
+        Cluster-admin (``*`` verbs on ``*`` resources cluster-wide) is flagged.
+        """
+
+        def _do():
+            croles = {cr.metadata.name: cr for cr in self._rbac.list_cluster_role().items}
+            roles = {
+                (r.metadata.namespace, r.metadata.name): r
+                for r in self._rbac.list_role_for_all_namespaces().items
+            }
+
+            def rules_of(role_ref, binding_ns):
+                if role_ref.kind == "ClusterRole":
+                    cr = croles.get(role_ref.name)
+                    return cr.rules or [] if cr else []
+                r = roles.get((binding_ns, role_ref.name))
+                return r.rules or [] if r else []
+
+            subjects: dict[str, dict] = {}
+
+            def add(subj, role_ref, scope, binding_ns):
+                key = f"{subj.kind}/{getattr(subj, 'namespace', None) or ''}/{subj.name}"
+                s = subjects.setdefault(key, {
+                    "kind": subj.kind, "name": subj.name,
+                    "namespace": getattr(subj, "namespace", None),
+                    "bindings": [], "verbs": set(), "resources": set(), "cluster_wide": False,
+                })
+                s["bindings"].append({
+                    "role": f"{role_ref.kind}/{role_ref.name}", "scope": scope,
+                })
+                if scope == "cluster":
+                    s["cluster_wide"] = True
+                for rule in rules_of(role_ref, binding_ns):
+                    s["verbs"].update(rule.verbs or [])
+                    s["resources"].update(rule.resources or [])
+
+            for crb in self._rbac.list_cluster_role_binding().items:
+                for subj in (crb.subjects or []):
+                    add(subj, crb.role_ref, "cluster", None)
+            for rb in self._rbac.list_role_binding_for_all_namespaces().items:
+                for subj in (rb.subjects or []):
+                    add(subj, rb.role_ref, rb.metadata.namespace, rb.metadata.namespace)
+
+            rows = []
+            for s in subjects.values():
+                admin = s["cluster_wide"] and "*" in s["verbs"] and "*" in s["resources"]
+                rows.append({
+                    "kind": s["kind"], "name": s["name"], "namespace": s["namespace"],
+                    "binding_count": len(s["bindings"]),
+                    "bindings": s["bindings"][:50],
+                    "verbs": sorted(s["verbs"]),
+                    "resources": sorted(s["resources"])[:60],
+                    "cluster_admin": admin,
+                })
+            rows.sort(key=lambda r: (not r["cluster_admin"], r["kind"], r["name"]))
+            admins = sum(1 for r in rows if r["cluster_admin"])
+            return {"subjects": rows, "total": len(rows), "cluster_admins": admins}
+
+        return self._cached("rbac_subjects", 15.0, lambda: self._guard("rbac subjects", _do))
+
+    def rbac_can_i(
+        self, verb: str, resource: str, namespace: str | None = None,
+        group: str = "", subresource: str | None = None, name: str | None = None,
+        user: str | None = None, groups: list[str] | None = None,
+        serviceaccount: str | None = None,
+    ) -> dict:
+        """Authoritative permission check via the SubjectAccessReview API.
+
+        With no subject, reviews the current credential (SelfSubjectAccessReview,
+        like ``kubectl auth can-i``). With a user/groups/serviceaccount, reviews
+        that subject (SubjectAccessReview — needs RBAC to create reviews).
+        """
+        from kubernetes import client as kc
+
+        auth = kc.AuthorizationV1Api(self._api_client)
+        attrs = kc.V1ResourceAttributes(
+            verb=verb, resource=resource, namespace=namespace,
+            group=group or None, subresource=subresource, name=name,
+        )
+
+        def _do():
+            if user or groups or serviceaccount:
+                sub_user = user
+                if serviceaccount and not sub_user:
+                    sub_user = (
+                        serviceaccount
+                        if serviceaccount.startswith("system:serviceaccount:")
+                        else f"system:serviceaccount:{namespace or 'default'}:{serviceaccount}"
+                    )
+                review = kc.V1SubjectAccessReview(
+                    spec=kc.V1SubjectAccessReviewSpec(
+                        resource_attributes=attrs,
+                        user=sub_user, groups=list(groups) if groups else None,
+                    )
+                )
+                res = auth.create_subject_access_review(review)
+                who = sub_user or "subject"
+            else:
+                review = kc.V1SelfSubjectAccessReview(
+                    spec=kc.V1SelfSubjectAccessReviewSpec(resource_attributes=attrs)
+                )
+                res = auth.create_self_subject_access_review(review)
+                who = "(credencial atual)"
+            st = res.status
+            return {
+                "allowed": bool(st.allowed),
+                "denied": bool(getattr(st, "denied", False)),
+                "reason": st.reason or "",
+                "subject": who,
+            }
+
+        return self._guard("access review", _do)
+
+    # --- security posture scan (PSS-style) -------------------------------
+
+    def security_scan(self, namespace: str | None = None) -> dict:
+        """Scan running pods for risky security settings and surface findings.
+
+        Inspired by the Pod Security Standards: privileged/host namespaces,
+        hostPath volumes, missing runAsNonRoot, dangerous capabilities, writable
+        root fs, missing resource limits, mutable image tags, auto-mounted SA
+        tokens. Returns ``{findings, counts, total, score, scanned}`` (score 0-100,
+        higher is safer). Cached briefly.
+        """
+
+        DANGEROUS_CAPS = {"SYS_ADMIN", "NET_ADMIN", "NET_RAW", "SYS_PTRACE", "ALL"}
+
+        def _do():
+            pods = (
+                self._core.list_namespaced_pod(namespace).items if namespace
+                else self._core.list_pod_for_all_namespaces().items
+            )
+            findings: list[dict] = []
+
+            def add(sev, ns, pod, container, rule, detail):
+                findings.append({
+                    "severity": sev, "namespace": ns, "pod": pod,
+                    "container": container, "rule": rule, "detail": detail,
+                })
+
+            for p in pods:
+                ns, nm = p.metadata.namespace, p.metadata.name
+                spec = p.spec
+                psc = spec.security_context
+                if spec.host_network:
+                    add("critical", ns, nm, None, "hostNetwork", "usa a rede do host")
+                if spec.host_pid:
+                    add("critical", ns, nm, None, "hostPID", "compartilha o PID namespace do host")
+                if spec.host_ipc:
+                    add("critical", ns, nm, None, "hostIPC", "compartilha o IPC namespace do host")
+                for vol in (spec.volumes or []):
+                    if vol.host_path:
+                        add("warning", ns, nm, None, "hostPath",
+                            f"volume {vol.name} monta {vol.host_path.path} do host")
+                pod_nonroot = bool(psc and (psc.run_as_non_root or (psc.run_as_user and psc.run_as_user != 0)))
+                automount = spec.automount_service_account_token
+                if automount is None or automount:
+                    add("info", ns, nm, None, "saToken",
+                        "token da ServiceAccount montado automaticamente")
+                for c in (spec.containers or []):
+                    sc = c.security_context
+                    if sc and sc.privileged:
+                        add("critical", ns, nm, c.name, "privileged", "container privilegiado")
+                    if sc and sc.allow_privilege_escalation:
+                        add("warning", ns, nm, c.name, "allowPrivilegeEscalation",
+                            "permite escalonamento de privilégio")
+                    c_nonroot = bool(sc and (sc.run_as_non_root or (sc.run_as_user and sc.run_as_user != 0)))
+                    if not (c_nonroot or pod_nonroot):
+                        add("warning", ns, nm, c.name, "runAsRoot",
+                            "pode rodar como root (runAsNonRoot não definido)")
+                    caps = sc.capabilities if sc else None
+                    if caps and caps.add:
+                        bad = {x.upper() for x in caps.add} & DANGEROUS_CAPS
+                        if bad:
+                            add("warning", ns, nm, c.name, "capabilities",
+                                "adiciona capabilities perigosas: " + ", ".join(sorted(bad)))
+                    if not (sc and sc.read_only_root_filesystem):
+                        add("info", ns, nm, c.name, "readOnlyRootFilesystem",
+                            "filesystem raiz é gravável")
+                    res = c.resources
+                    lim = (res.limits or {}) if res else {}
+                    if not (lim.get("cpu") or lim.get("memory")):
+                        add("warning", ns, nm, c.name, "noLimits", "sem limits de recursos")
+                    img = c.image or ""
+                    tag = img.rsplit("/", 1)[-1]
+                    if img.endswith(":latest") or ":" not in tag:
+                        add("info", ns, nm, c.name, "mutableTag",
+                            f"imagem sem tag fixa: {img or '(?)'}")
+
+            counts: dict[str, int] = {}
+            for f in findings:
+                counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+            order = {"critical": 0, "warning": 1, "info": 2}
+            findings.sort(key=lambda f: (
+                order.get(f["severity"], 3), f["namespace"] or "", f["pod"] or "",
+            ))
+            score = max(0, 100 - counts.get("critical", 0) * 10
+                        - counts.get("warning", 0) * 3 - counts.get("info", 0))
+            return {
+                "findings": findings, "counts": counts, "total": len(findings),
+                "score": score, "scanned": len(pods),
+            }
+
+        key = f"secscan:{namespace or '*'}"
+        return self._cached(key, 8.0, lambda: self._guard("security scan", _do))
+
+    # --- CRDs / custom resources (descoberta dinâmica) -------------------
+
+    def list_crds(self) -> dict:
+        """List CustomResourceDefinitions installed in the cluster."""
+        from kubernetes import client as kc
+
+        api = kc.ApiextensionsV1Api(self._api_client)
+
+        def _do():
+            rows = []
+            for crd in api.list_custom_resource_definition().items:
+                spec = crd.spec
+                served = [v.name for v in (spec.versions or []) if v.served]
+                storage = next(
+                    (v.name for v in (spec.versions or []) if v.storage),
+                    served[0] if served else None,
+                )
+                rows.append({
+                    "name": crd.metadata.name,
+                    "group": spec.group,
+                    "kind": spec.names.kind,
+                    "plural": spec.names.plural,
+                    "scope": spec.scope,  # "Namespaced" | "Cluster"
+                    "versions": served,
+                    "version": storage,
+                    "age": _short_age(crd.metadata.creation_timestamp),
+                })
+            rows.sort(key=lambda r: (r["group"] or "", r["kind"]))
+            return {"rows": rows, "total": len(rows)}
+
+        return self._cached("crds", 30.0, lambda: self._guard("list CRDs", _do))
+
+    def list_custom_resource(
+        self, group: str, version: str, plural: str, namespace: str | None = None
+    ) -> dict:
+        """List instances of a custom resource as a generic name/namespace/age table."""
+        from kubernetes import client as kc
+
+        api = kc.CustomObjectsApi(self._api_client)
+
+        def _do():
+            if namespace:
+                data = api.list_namespaced_custom_object(group, version, namespace, plural)
+            else:
+                data = api.list_cluster_custom_object(group, version, plural)
+            rows = []
+            for it in data.get("items", []):
+                meta = it.get("metadata", {})
+                rows.append({
+                    "name": meta.get("name"),
+                    "namespace": meta.get("namespace"),
+                    "age": _short_age(_parse_ts(meta.get("creationTimestamp"))),
+                })
+            rows.sort(key=lambda r: (r.get("namespace") or "", r.get("name") or ""))
+            return {"group": group, "version": version, "plural": plural,
+                    "rows": rows, "total": len(rows)}
+
+        return self._guard(f"list {plural}", _do)
+
+    def get_custom_resource(
+        self, group: str, version: str, plural: str, name: str,
+        namespace: str | None = None,
+    ) -> str:
+        """Fetch a single custom resource instance as YAML."""
+        from kubernetes import client as kc
+
+        api = kc.CustomObjectsApi(self._api_client)
+
+        def _do():
+            if namespace:
+                obj = api.get_namespaced_custom_object(group, version, namespace, plural, name)
+            else:
+                obj = api.get_cluster_custom_object(group, version, plural, name)
+            obj.get("metadata", {}).pop("managedFields", None)
+            return yaml.safe_dump(obj, sort_keys=False, default_flow_style=False, width=4096)
+
+        return self._guard(f"get {plural}/{name}", _do)
+
+    # --- capacity & rightsizing ------------------------------------------
+
+    def capacity(self) -> dict:
+        """Per-node allocatable vs requested vs live usage — the scheduling
+        headroom view (like the 'Allocated resources' in ``kubectl describe
+        node``, cluster-wide). ``totals.metrics_available`` is False when
+        metrics-server is absent (usage columns are then null)."""
+
+        def _do():
+            nodes = self._core.list_node().items
+            pods = self._core.list_pod_for_all_namespaces().items
+
+            req: dict[str, dict] = {}
+            for p in pods:
+                if p.status and p.status.phase in ("Succeeded", "Failed"):
+                    continue
+                node = p.spec.node_name
+                if not node:
+                    continue
+                a = req.setdefault(node, {"cpu": 0, "mem": 0, "pods": 0})
+                a["pods"] += 1
+                for c in (p.spec.containers or []):
+                    r = (c.resources.requests or {}) if c.resources else {}
+                    a["cpu"] += _cpu_milli(r.get("cpu"))
+                    a["mem"] += _mem_mib(r.get("memory"))
+
+            usage: dict[str, tuple] = {}
+            top = self.cluster_top("nodes", nodes=nodes)
+            metrics_ok = bool(top.get("available"))
+            if metrics_ok:
+                for row in top["rows"]:
+                    usage[row["name"]] = (row["cpu"], row["memory"])
+
+            rows = []
+            tot = {"cpu_alloc": 0, "mem_alloc": 0, "cpu_req": 0, "mem_req": 0,
+                   "cpu_use": 0, "mem_use": 0, "pods": 0, "pod_cap": 0}
+            for n in nodes:
+                name = n.metadata.name
+                alloc = n.status.allocatable or {}
+                cpu_alloc = _cpu_milli(alloc.get("cpu"))
+                mem_alloc = _mem_mib(alloc.get("memory"))
+                pod_cap = int(alloc.get("pods", 0) or 0)
+                r = req.get(name, {"cpu": 0, "mem": 0, "pods": 0})
+                cpu_use, mem_use = usage.get(name, (None, None))
+                rows.append({
+                    "name": name,
+                    "cpu_alloc": cpu_alloc, "cpu_req": r["cpu"], "cpu_use": cpu_use,
+                    "cpu_req_pct": round(r["cpu"] / cpu_alloc * 100) if cpu_alloc else None,
+                    "cpu_use_pct": round(cpu_use / cpu_alloc * 100) if (cpu_use and cpu_alloc) else None,
+                    "mem_alloc": mem_alloc, "mem_req": r["mem"], "mem_use": mem_use,
+                    "mem_req_pct": round(r["mem"] / mem_alloc * 100) if mem_alloc else None,
+                    "mem_use_pct": round(mem_use / mem_alloc * 100) if (mem_use and mem_alloc) else None,
+                    "pods": r["pods"], "pod_cap": pod_cap,
+                    "schedulable": not (n.spec and n.spec.unschedulable),
+                })
+                tot["cpu_alloc"] += cpu_alloc
+                tot["mem_alloc"] += mem_alloc
+                tot["cpu_req"] += r["cpu"]
+                tot["mem_req"] += r["mem"]
+                tot["pods"] += r["pods"]
+                tot["pod_cap"] += pod_cap
+                tot["cpu_use"] += cpu_use or 0
+                tot["mem_use"] += mem_use or 0
+            rows.sort(key=lambda r: r["name"])
+            tot["metrics_available"] = metrics_ok
+            return {"nodes": rows, "totals": tot}
+
+        return self._cached("capacity", 8.0, lambda: self._guard("capacity", _do))
+
+    def rightsizing(self, namespace: str | None = None) -> dict:
+        """Compare each pod's requests/limits to its live usage (metrics-server)
+        and recommend right-sized requests. ``available`` is False when
+        metrics-server is missing. Recommendation = ~1.2× current usage (with a
+        small floor); flags over/under-provisioning and OOM risk."""
+
+        def _do():
+            top = self.cluster_top("pods", namespace=namespace)
+            if not top.get("available"):
+                return {"available": False, "message": top.get("message"), "rows": [], "total": 0}
+            usage = {(r["namespace"], r["name"]): (r["cpu"], r["memory"]) for r in top["rows"]}
+
+            pods = (
+                self._core.list_namespaced_pod(namespace).items if namespace
+                else self._core.list_pod_for_all_namespaces().items
+            )
+            rows = []
+            for p in pods:
+                ns, nm = p.metadata.namespace, p.metadata.name
+                use = usage.get((ns, nm))
+                if not use:
+                    continue
+                cpu_use, mem_use = use
+                cpu_req = mem_req = cpu_lim = mem_lim = 0
+                for c in (p.spec.containers or []):
+                    r = (c.resources.requests or {}) if c.resources else {}
+                    lim = (c.resources.limits or {}) if c.resources else {}
+                    cpu_req += _cpu_milli(r.get("cpu"))
+                    mem_req += _mem_mib(r.get("memory"))
+                    cpu_lim += _cpu_milli(lim.get("cpu"))
+                    mem_lim += _mem_mib(lim.get("memory"))
+                verdict = []
+                if not cpu_req:
+                    verdict.append("sem request de CPU")
+                elif cpu_req > cpu_use * 2 and cpu_req - cpu_use > 50:
+                    verdict.append("CPU superdimensionada")
+                elif cpu_use > cpu_req * 1.5:
+                    verdict.append("CPU subdimensionada")
+                if not mem_req:
+                    verdict.append("sem request de memória")
+                elif mem_req > mem_use * 2 and mem_req - mem_use > 64:
+                    verdict.append("memória superdimensionada")
+                elif mem_use > mem_req * 1.5:
+                    verdict.append("memória subdimensionada")
+                if mem_lim and mem_use > mem_lim * 0.9:
+                    verdict.append("perto do limite de memória (risco de OOM)")
+                rows.append({
+                    "namespace": ns, "pod": nm,
+                    "cpu_use": cpu_use, "cpu_req": cpu_req, "cpu_lim": cpu_lim,
+                    "cpu_rec": max(10, round(cpu_use * 1.2)) if cpu_use else None,
+                    "mem_use": mem_use, "mem_req": mem_req, "mem_lim": mem_lim,
+                    "mem_rec": max(16, round(mem_use * 1.2)) if mem_use else None,
+                    "verdict": verdict,
+                })
+            rows.sort(key=lambda r: (len(r["verdict"]) == 0, r["namespace"], r["pod"]))
+            return {"available": True, "rows": rows, "total": len(rows)}
+
+        key = f"rightsize:{namespace or '*'}"
+        return self._cached(key, 8.0, lambda: self._guard("rightsizing", _do))
 
     # --- helpers ----------------------------------------------------------
 

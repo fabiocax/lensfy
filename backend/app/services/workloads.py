@@ -236,6 +236,61 @@ class WorkloadService:
         except KubernetesError as exc:
             raise WorkloadServiceError(str(exc)) from exc
 
+    # --- RBAC & segurança ---
+    def rbac_subjects(self, cluster_id):
+        try:
+            return self._client(cluster_id).rbac_subjects()
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    def rbac_can_i(self, cluster_id, **kwargs):
+        try:
+            return self._client(cluster_id).rbac_can_i(**kwargs)
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    def security_scan(self, cluster_id, namespace=None):
+        try:
+            return self._client(cluster_id).security_scan(namespace)
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    # --- CRDs / custom resources ---
+    def list_crds(self, cluster_id):
+        try:
+            return self._client(cluster_id).list_crds()
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    def list_custom_resource(self, cluster_id, group, version, plural, namespace=None):
+        try:
+            return self._client(cluster_id).list_custom_resource(
+                group, version, plural, namespace
+            )
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    def get_custom_resource(self, cluster_id, group, version, plural, name, namespace=None):
+        try:
+            return self._client(cluster_id).get_custom_resource(
+                group, version, plural, name, namespace
+            )
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    # --- capacidade & rightsizing ---
+    def capacity(self, cluster_id):
+        try:
+            return self._client(cluster_id).capacity()
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
+    def rightsizing(self, cluster_id, namespace=None):
+        try:
+            return self._client(cluster_id).rightsizing(namespace)
+        except KubernetesError as exc:
+            raise WorkloadServiceError(str(exc)) from exc
+
     def start_port_forward(self, cluster_id, namespace, pod, remote_port, local_port):
         from app.kubernetes.portforward import manager
 

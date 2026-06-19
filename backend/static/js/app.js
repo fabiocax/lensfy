@@ -52,6 +52,7 @@
       items: [
         { id: 'services', label: 'Services', icon: 'fa-network-wired' },
         { id: 'ingress', label: 'Ingress', icon: 'fa-globe' },
+        { id: 'networkpolicies', label: 'Network Policies', icon: 'fa-shield' },
       ],
     },
     {
@@ -85,6 +86,10 @@
       ],
     },
     {
+      group: 'Custom Resources',
+      items: [{ id: 'crds', label: 'CRDs', icon: 'fa-cubes' }],
+    },
+    {
       group: 'Helm',
       items: [{ id: 'helm', label: 'Releases', icon: 'fa-ship' }],
     },
@@ -97,7 +102,10 @@
   const VIEW_LABELS = {};
   TREE.forEach((g) => g.items.forEach((i) => (VIEW_LABELS[i.id] = i.label)));
   // Views promovidas para o menu superior (não ficam na árvore).
-  Object.assign(VIEW_LABELS, { issues: 'Problemas', budget: 'Recursos', map: 'Mapa' });
+  Object.assign(VIEW_LABELS, {
+    issues: 'Problemas', budget: 'Recursos', map: 'Mapa',
+    security: 'Segurança', rbac: 'RBAC', capacity: 'Capacidade', search: 'Busca global',
+  });
 
   // ---------- helpers ----------
   const $ = (sel) => document.querySelector(sel);
@@ -879,11 +887,16 @@
     $('#view-title').textContent = VIEW_LABELS[state.view] || 'Dashboard';
     viewActions = null; // cada view define as suas (ex.: "Criar")
     // Destaca o item do menu superior correspondente à view atual.
-    [['nav-issues', 'issues'], ['nav-budget', 'budget'], ['nav-map', 'map']].forEach(([bid, v]) => {
+    [['nav-issues', 'issues'], ['nav-budget', 'budget'], ['nav-map', 'map'],
+     ['nav-security', 'security'], ['nav-rbac', 'rbac'], ['nav-capacity', 'capacity'],
+     ['nav-search', 'search']].forEach(([bid, v]) => {
       const b = $('#' + bid);
       if (b) b.classList.toggle('active', state.view === v);
     });
     setActions('');
+    if (state.view !== 'crds') state.crdSel = null; // sai do drill-down de CRD
+    // Busca global é entre clusters — não exige um cluster atual.
+    if (state.view === 'search') return await viewSearch();
     const cur = current();
     if (!cur) {
       return emptyState('fa-binoculars', 'Bem-vindo ao Lensfy', 'Importe um kubeconfig para começar.');
@@ -893,6 +906,10 @@
       if (state.view === 'issues') return await viewIssues(cur);
       if (state.view === 'budget') return await viewBudget(cur);
       if (state.view === 'map') return await viewMap(cur);
+      if (state.view === 'security') return await viewSecurity(cur);
+      if (state.view === 'rbac') return await viewRBAC(cur);
+      if (state.view === 'capacity') return await viewCapacity(cur);
+      if (state.view === 'crds') return await viewCRDs(cur);
       if (state.view === 'metrics') return await viewMetrics(cur);
       if (state.view === 'pods') return await viewPods(cur);
       if (state.view === 'deployments') return await viewDeployments(cur);
@@ -1655,6 +1672,363 @@
     );
     $('#map-refresh').addEventListener('click', () => viewMap(cur));
     $('#map-fit').addEventListener('click', fit);
+  }
+
+  // ---------- Segurança (varredura de postura PSS-style) ----------
+  function secSevBadge(s) {
+    if (s === 'critical') return '<span class="badge danger">crítico</span>';
+    if (s === 'warning') return '<span class="badge warning">alerta</span>';
+    return '<span class="badge">info</span>';
+  }
+  async function viewSecurity(cur) {
+    loading();
+    const nsParam = state.selectedNs.length === 1 ? `&namespace=${encodeURIComponent(state.selectedNs[0])}` : '';
+    const load = async () => {
+      let data;
+      try {
+        data = await api(`/security/scan?cluster_id=${cur.id}${nsParam}`);
+      } catch (e) {
+        return emptyState('fa-circle-exclamation', 'Erro na varredura de segurança', e.message);
+      }
+      if (state.view !== 'security' || state.currentId !== cur.id) return;
+      const findings = (data.findings || []).filter((f) => !f.namespace || nsMatch(f.namespace));
+      const c = data.counts || {};
+      const scoreColor = data.score >= 80 ? 'var(--color-success)' : data.score >= 50 ? 'var(--color-warning,#d6a700)' : 'var(--color-danger)';
+      setActions(
+        `<span class="bulk-count" style="color:${scoreColor}">score ${data.score}/100</span> ` +
+        `<span class="bulk-count" style="color:var(--color-danger)">${c.critical || 0} crítico(s)</span> ` +
+        `<span class="bulk-count" style="color:var(--color-warning,#d6a700)">${c.warning || 0} alerta(s)</span> ` +
+        liveBadge()
+      );
+      if (!findings.length) {
+        return emptyState('fa-shield-halved', 'Nenhum risco detectado', `${data.scanned} pod(s) analisado(s).`);
+      }
+      const groups = {};
+      findings.forEach((f) => (groups[f.rule] = groups[f.rule] || []).push(f));
+      const sections = Object.keys(groups).map((rule) => {
+        const rows = groups[rule].map((f) =>
+          `<tr data-name="${esc(f.pod)}" data-ns="${esc(f.namespace || '')}" style="cursor:pointer">` +
+          `<td>${secSevBadge(f.severity)}</td>` +
+          `<td>${f.namespace ? `<span class="badge">${esc(f.namespace)}</span> ` : ''}${esc(f.pod)}</td>` +
+          `<td>${f.container ? esc(f.container) : '<span style="color:var(--text-tertiary)">—</span>'}</td>` +
+          `<td style="color:var(--text-secondary)">${esc(f.detail || '')}</td></tr>`
+        ).join('');
+        return `<div class="dash-card" style="margin-bottom:var(--space-4)"><h3 style="margin:0 0 var(--space-2)">` +
+          `<i class="fas fa-shield-halved"></i> ${esc(rule)} <span class="log-count">(${groups[rule].length})</span></h3>` +
+          `<table class="data-table"><thead><tr><th>Severidade</th><th>Pod</th><th>Container</th><th>Detalhe</th></tr></thead>` +
+          `<tbody>${rows}</tbody></table></div>`;
+      }).join('');
+      $('#view-body').innerHTML = `<div class="security">${sections}</div>`;
+      $('#view-body').querySelectorAll('tr[data-name]').forEach((tr) =>
+        tr.addEventListener('click', () =>
+          openDetail(cur, 'pods', tr.dataset.name, tr.dataset.ns || '', null, null)));
+    };
+    await load();
+    state.viewTimer = setInterval(load, 20000);
+  }
+
+  // ---------- RBAC (sujeitos + simulador can-i) ----------
+  async function viewRBAC(cur) {
+    loading();
+    let data;
+    try {
+      data = await api(`/security/rbac/subjects?cluster_id=${cur.id}`);
+    } catch (e) {
+      return emptyState('fa-circle-exclamation', 'Erro ao carregar RBAC', e.message);
+    }
+    if (state.view !== 'rbac' || state.currentId !== cur.id) return;
+    setActions(
+      `<span class="bulk-count" style="color:var(--color-danger)">${data.cluster_admins} cluster-admin(s)</span> ` +
+      `<span class="bulk-count">${data.total} sujeito(s)</span>`
+    );
+    const rows = (data.subjects || []).map((s, i) =>
+      `<tr data-i="${i}" style="cursor:pointer">` +
+      `<td><span class="badge">${esc(s.kind)}</span></td>` +
+      `<td>${s.namespace ? `<span class="badge">${esc(s.namespace)}</span> ` : ''}<b>${esc(s.name)}</b>` +
+      `${s.cluster_admin ? ' <span class="badge danger">cluster-admin</span>' : ''}</td>` +
+      `<td>${s.binding_count}</td>` +
+      `<td style="color:var(--text-secondary)">${esc((s.verbs || []).slice(0, 8).join(', '))}${(s.verbs || []).length > 8 ? '…' : ''}</td>` +
+      `<td style="color:var(--text-secondary)">${esc((s.resources || []).slice(0, 8).join(', '))}${(s.resources || []).length > 8 ? '…' : ''}</td></tr>`
+    ).join('');
+    const simulator =
+      `<div class="dash-card" style="margin-bottom:var(--space-4)"><h3 style="margin:0 0 var(--space-2)">` +
+      `<i class="fas fa-vial"></i> Simulador “can-i”</h3>` +
+      `<div style="display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center">` +
+      `<input class="input input-inline" id="ci-verb" placeholder="verbo (get, create, *)" style="flex:0 1 160px">` +
+      `<input class="input input-inline" id="ci-res" placeholder="recurso (pods, secrets)" style="flex:0 1 180px">` +
+      `<input class="input input-inline" id="ci-ns" placeholder="namespace (opcional)" style="flex:0 1 170px">` +
+      `<input class="input input-inline" id="ci-sa" placeholder="serviceaccount (opcional)" style="flex:0 1 210px">` +
+      `<button class="btn btn-primary btn-sm" id="ci-run">Verificar</button>` +
+      `<span id="ci-out"></span></div></div>`;
+    const table =
+      `<div class="dash-card"><h3 style="margin:0 0 var(--space-2)"><i class="fas fa-user-shield"></i> Sujeitos RBAC</h3>` +
+      `<table class="data-table"><thead><tr><th>Tipo</th><th>Sujeito</th><th>Bindings</th><th>Verbos</th><th>Recursos</th></tr></thead>` +
+      `<tbody>${rows}</tbody></table></div>`;
+    $('#view-body').innerHTML = `<div class="rbac">${simulator}${table}</div>`;
+    $('#ci-run').addEventListener('click', async () => {
+      const verb = $('#ci-verb').value.trim();
+      const resource = $('#ci-res').value.trim();
+      const out = $('#ci-out');
+      if (!verb || !resource) {
+        out.innerHTML = '<span class="badge warning">informe verbo e recurso</span>';
+        return;
+      }
+      out.innerHTML = '<span style="color:var(--text-tertiary)">verificando…</span>';
+      try {
+        const r = await api(`/security/rbac/can-i?cluster_id=${cur.id}`, {
+          method: 'POST',
+          body: JSON.stringify({
+            verb, resource,
+            namespace: $('#ci-ns').value.trim() || null,
+            serviceaccount: $('#ci-sa').value.trim() || null,
+          }),
+        });
+        out.innerHTML = r.allowed
+          ? '<span class="badge success">permitido</span>'
+          : '<span class="badge danger">negado</span>';
+        if (r.reason) out.innerHTML += ` <span style="color:var(--text-tertiary)">${esc(r.reason)}</span>`;
+      } catch (e) {
+        out.innerHTML = `<span class="badge danger">${esc(e.message)}</span>`;
+      }
+    });
+    $('#view-body').querySelectorAll('tr[data-i]').forEach((tr) =>
+      tr.addEventListener('click', () => {
+        const s = data.subjects[+tr.dataset.i];
+        const binds = (s.bindings || []).map((b) =>
+          `<tr><td>${esc(b.role)}</td><td>${esc(b.scope)}</td></tr>`).join('') ||
+          '<tr><td colspan="2" style="color:var(--text-tertiary)">—</td></tr>';
+        uiModal({
+          title: `${s.kind}: ${s.name}`, icon: 'fa-user-shield', width: 'min(560px,94vw)',
+          body:
+            `<p style="margin:0 0 8px"><b>Verbos:</b> ${esc((s.verbs || []).join(', ') || '—')}</p>` +
+            `<p style="margin:0 0 8px"><b>Recursos:</b> ${esc((s.resources || []).join(', ') || '—')}</p>` +
+            `<table class="data-table"><thead><tr><th>Role</th><th>Escopo</th></tr></thead><tbody>${binds}</tbody></table>`,
+          actions: [{ label: 'Fechar', cls: 'btn-primary', primary: true, value: 'ok' }],
+        });
+      }));
+  }
+
+  // ---------- Capacidade & Rightsizing ----------
+  let capacityTab = 'capacity';
+  async function viewCapacity(cur) {
+    const chip = (v, l) => `<button class="btn btn-sm chip ${capacityTab === v ? 'active' : ''}" data-ctab="${v}">${l}</button>`;
+    loading();
+    setActions(chip('capacity', 'Capacidade') + chip('rightsizing', 'Rightsizing') + liveBadge());
+    $('#view-actions').querySelectorAll('[data-ctab]').forEach((b) =>
+      b.addEventListener('click', () => {
+        if (capacityTab !== b.dataset.ctab) {
+          capacityTab = b.dataset.ctab;
+          viewCapacity(cur);
+        }
+      }));
+    const load = capacityTab === 'rightsizing' ? loadRightsizing : loadCapacity;
+    await load(cur);
+    state.viewTimer = setInterval(() => {
+      if (state.view === 'capacity' && state.currentId === cur.id) load(cur);
+    }, 15000);
+  }
+  async function loadCapacity(cur) {
+    let data;
+    try {
+      data = await api(`/capacity?cluster_id=${cur.id}`);
+    } catch (e) {
+      return emptyState('fa-circle-exclamation', 'Erro ao calcular capacidade', e.message);
+    }
+    if (state.view !== 'capacity' || state.currentId !== cur.id || capacityTab !== 'capacity') return;
+    const t = data.totals || {};
+    const dash = (pct, txt) => `${usageBar(pct)}<small style="color:var(--text-tertiary)">${txt}</small>`;
+    const noMetrics = '<span style="color:var(--text-tertiary)">—</span>';
+    const rows = (data.nodes || []).map((n) =>
+      `<tr><td><b>${esc(n.name)}</b>${n.schedulable ? '' : ' <span class="badge warning">cordonado</span>'}</td>` +
+      `<td>${dash(n.cpu_req_pct, `${fmtCpu(n.cpu_req)} / ${fmtCpu(n.cpu_alloc)}`)}</td>` +
+      `<td>${t.metrics_available ? usageBar(n.cpu_use_pct) : noMetrics}</td>` +
+      `<td>${dash(n.mem_req_pct, `${fmtMem(n.mem_req)} / ${fmtMem(n.mem_alloc)}`)}</td>` +
+      `<td>${t.metrics_available ? usageBar(n.mem_use_pct) : noMetrics}</td>` +
+      `<td>${n.pods}/${n.pod_cap || '—'}</td></tr>`
+    ).join('');
+    const stat = (label, value) =>
+      `<div><div style="color:var(--text-tertiary);font-size:var(--font-size-sm)">${label}</div><b>${value}</b></div>`;
+    const totCard =
+      `<div class="dash-card" style="margin-bottom:var(--space-4)"><h3 style="margin:0 0 var(--space-2)">` +
+      `<i class="fas fa-gauge"></i> Totais do cluster</h3>` +
+      `<div style="display:flex;gap:var(--space-4);flex-wrap:wrap;align-items:flex-start">` +
+      stat('CPU solicitada', `${fmtCpu(t.cpu_req || 0)} / ${fmtCpu(t.cpu_alloc || 0)}`) +
+      stat('Memória solicitada', `${fmtMem(t.mem_req || 0)} / ${fmtMem(t.mem_alloc || 0)}`) +
+      stat('Pods', `${t.pods || 0} / ${t.pod_cap || 0}`) +
+      (t.metrics_available ? '' : `<div style="color:var(--text-tertiary)"><i class="fas fa-circle-info"></i> uso indisponível (sem metrics-server)</div>`) +
+      `</div></div>`;
+    $('#view-body').innerHTML = totCard +
+      `<div class="dash-card"><h3 style="margin:0 0 var(--space-2)"><i class="fas fa-server"></i> Nós</h3>` +
+      `<table class="data-table"><thead><tr><th>Nó</th><th>CPU solicitada</th><th>CPU uso</th><th>Mem solicitada</th><th>Mem uso</th><th>Pods</th></tr></thead>` +
+      `<tbody>${rows}</tbody></table></div>`;
+  }
+  async function loadRightsizing(cur) {
+    const nsParam = state.selectedNs.length === 1 ? `&namespace=${encodeURIComponent(state.selectedNs[0])}` : '';
+    let data;
+    try {
+      data = await api(`/capacity/rightsizing?cluster_id=${cur.id}${nsParam}`);
+    } catch (e) {
+      return emptyState('fa-circle-exclamation', 'Erro no rightsizing', e.message);
+    }
+    if (state.view !== 'capacity' || state.currentId !== cur.id || capacityTab !== 'rightsizing') return;
+    if (!data.available) {
+      return emptyState('fa-gauge', 'Rightsizing indisponível', data.message || 'Instale o metrics-server para obter recomendações.');
+    }
+    const rows = (data.rows || []).filter((r) => nsMatch(r.namespace));
+    if (!rows.length) return emptyState('fa-circle-check', 'Sem recomendações', 'Os recursos parecem adequados.');
+    const body = rows.map((r) => {
+      const verd = (r.verdict || []).map((v) => `<span class="badge warning">${esc(v)}</span>`).join(' ') || '<span class="badge success">ok</span>';
+      return `<tr data-name="${esc(r.pod)}" data-ns="${esc(r.namespace)}" style="cursor:pointer">` +
+        `<td><span class="badge">${esc(r.namespace)}</span> ${esc(r.pod)}</td>` +
+        `<td>${fmtCpu(r.cpu_use || 0)}</td><td>${r.cpu_req ? fmtCpu(r.cpu_req) : '—'}</td><td>${r.cpu_rec ? fmtCpu(r.cpu_rec) : '—'}</td>` +
+        `<td>${fmtMem(r.mem_use || 0)}</td><td>${r.mem_req ? fmtMem(r.mem_req) : '—'}</td><td>${r.mem_rec ? fmtMem(r.mem_rec) : '—'}</td>` +
+        `<td>${verd}</td></tr>`;
+    }).join('');
+    $('#view-body').innerHTML =
+      `<div class="dash-card"><h3 style="margin:0 0 var(--space-2)"><i class="fas fa-wand-magic-sparkles"></i> Recomendações de rightsizing</h3>` +
+      `<p style="color:var(--text-tertiary);margin:0 0 var(--space-2)">Uso real (metrics-server) vs requests; recomendação ≈ 1,2× o uso atual.</p>` +
+      `<table class="data-table"><thead><tr><th>Pod</th><th>CPU uso</th><th>CPU req</th><th>CPU rec</th><th>Mem uso</th><th>Mem req</th><th>Mem rec</th><th>Análise</th></tr></thead>` +
+      `<tbody>${body}</tbody></table></div>`;
+    $('#view-body').querySelectorAll('tr[data-name]').forEach((tr) =>
+      tr.addEventListener('click', () => openDetail(cur, 'pods', tr.dataset.name, tr.dataset.ns, null, null)));
+  }
+
+  // ---------- CRDs / Custom Resources (descoberta dinâmica) ----------
+  async function viewCRDs(cur) {
+    if (state.crdSel) return loadCRDInstances(cur, state.crdSel);
+    loading();
+    let data;
+    try {
+      data = await api(`/crds?cluster_id=${cur.id}`);
+    } catch (e) {
+      return emptyState('fa-circle-exclamation', 'Erro ao listar CRDs', e.message);
+    }
+    if (state.view !== 'crds' || state.currentId !== cur.id) return;
+    setActions(`<span class="bulk-count">${data.total} CRD(s)</span>`);
+    if (!data.rows.length) {
+      return emptyState('fa-cubes', 'Nenhuma CRD instalada', 'Operadores como ArgoCD/cert-manager registram CRDs aqui.');
+    }
+    const groups = {};
+    data.rows.forEach((c) => (groups[c.group || '(core)'] = groups[c.group || '(core)'] || []).push(c));
+    const sections = Object.keys(groups).sort().map((g) => {
+      const rws = groups[g].map((c) =>
+        `<tr data-crd='${esc(JSON.stringify({ group: c.group, version: c.version, plural: c.plural, kind: c.kind, scope: c.scope }))}' style="cursor:pointer">` +
+        `<td><b>${esc(c.kind)}</b></td><td>${esc(c.plural)}</td><td>${esc(c.scope)}</td>` +
+        `<td>${esc((c.versions || []).join(', '))}</td><td>${esc(c.age || '')}</td></tr>`
+      ).join('');
+      return `<div class="dash-card" style="margin-bottom:var(--space-4)"><h3 style="margin:0 0 var(--space-2)">` +
+        `<i class="fas fa-cubes"></i> ${esc(g)} <span class="log-count">(${groups[g].length})</span></h3>` +
+        `<table class="data-table"><thead><tr><th>Kind</th><th>Plural</th><th>Escopo</th><th>Versões</th><th>Idade</th></tr></thead>` +
+        `<tbody>${rws}</tbody></table></div>`;
+    }).join('');
+    $('#view-body').innerHTML = `<div class="crds">${sections}</div>`;
+    $('#view-body').querySelectorAll('tr[data-crd]').forEach((tr) =>
+      tr.addEventListener('click', () => {
+        state.crdSel = JSON.parse(tr.dataset.crd);
+        loadCRDInstances(cur, state.crdSel);
+      }));
+  }
+  async function loadCRDInstances(cur, crd) {
+    loading();
+    const namespaced = crd.scope === 'Namespaced';
+    const nsParam = (namespaced && state.selectedNs.length === 1) ? `&namespace=${encodeURIComponent(state.selectedNs[0])}` : '';
+    setActions(`<button class="btn btn-sm" id="crd-back"><i class="fas fa-arrow-left"></i> CRDs</button> <span class="bulk-count">${esc(crd.kind)}</span>`);
+    $('#crd-back').addEventListener('click', () => { state.crdSel = null; viewCRDs(cur); });
+    let data;
+    try {
+      data = await api(`/crds/instances?cluster_id=${cur.id}&group=${encodeURIComponent(crd.group)}&version=${encodeURIComponent(crd.version)}&plural=${encodeURIComponent(crd.plural)}${nsParam}`);
+    } catch (e) {
+      return emptyState('fa-circle-exclamation', 'Erro ao listar instâncias', e.message);
+    }
+    if (state.view !== 'crds' || state.currentId !== cur.id) return;
+    const rows = (data.rows || []).filter((r) => !namespaced || !r.namespace || nsMatch(r.namespace));
+    if (!rows.length) return emptyState('fa-cube', `Nenhum ${crd.kind}`, 'Nenhuma instância encontrada.');
+    const body = rows.map((r) =>
+      `<tr data-name="${esc(r.name)}" data-ns="${esc(r.namespace || '')}" style="cursor:pointer">` +
+      `<td><b>${esc(r.name)}</b></td>${namespaced ? `<td><span class="badge">${esc(r.namespace || '')}</span></td>` : ''}<td>${esc(r.age || '')}</td></tr>`
+    ).join('');
+    $('#view-body').innerHTML =
+      `<div class="dash-card"><h3 style="margin:0 0 var(--space-2)"><i class="fas fa-cube"></i> ${esc(crd.kind)} <span class="log-count">(${rows.length})</span></h3>` +
+      `<table class="data-table"><thead><tr><th>Nome</th>${namespaced ? '<th>Namespace</th>' : ''}<th>Idade</th></tr></thead><tbody>${body}</tbody></table></div>`;
+    $('#view-body').querySelectorAll('tr[data-name]').forEach((tr) =>
+      tr.addEventListener('click', () => openCRDYaml(cur, crd, tr.dataset.name, tr.dataset.ns || '')));
+  }
+  function openCRDYaml(cur, crd, name, ns) {
+    uiModal({
+      title: `${crd.kind}: ${name}`, icon: 'fa-file-code', width: 'min(820px,96vw)',
+      body: '<div id="crd-yaml" style="max-height:60vh;overflow:auto"><div class="empty-state" style="height:120px"><div class="spinner"></div></div></div>',
+      actions: [{ label: 'Fechar', cls: 'btn-primary', primary: true, value: 'ok' }],
+      onOpen: async (bd) => {
+        const box = bd.querySelector('#crd-yaml');
+        const q = `cluster_id=${cur.id}&group=${encodeURIComponent(crd.group)}&version=${encodeURIComponent(crd.version)}&plural=${encodeURIComponent(crd.plural)}&name=${encodeURIComponent(name)}` + (ns ? `&namespace=${encodeURIComponent(ns)}` : '');
+        try {
+          const r = await api(`/crds/manifest?${q}`);
+          box.innerHTML = `<pre style="margin:0;white-space:pre;font-size:12px;line-height:1.5">${esc(r.yaml)}</pre>`;
+        } catch (e) {
+          box.innerHTML = `<p style="color:var(--color-danger)">${esc(e.message)}</p>`;
+        }
+      },
+    });
+  }
+
+  // ---------- Busca global (entre clusters) ----------
+  let searchGlobalQuery = '';
+  async function viewSearch() {
+    setActions('');
+    $('#view-body').innerHTML =
+      `<div class="global-search-view">` +
+      `<div class="dash-card" style="margin-bottom:var(--space-4)"><h3 style="margin:0 0 var(--space-2)">` +
+      `<i class="fas fa-magnifying-glass"></i> Busca global (todos os clusters)</h3>` +
+      `<div style="display:flex;gap:var(--space-2);align-items:center">` +
+      `<input class="input" id="gsv-input" placeholder="nome do recurso (pods, services, deployments…)" value="${esc(searchGlobalQuery)}" style="flex:1" autofocus>` +
+      `<button class="btn btn-primary" id="gsv-run">Buscar</button></div>` +
+      `<p style="color:var(--text-tertiary);margin:var(--space-2) 0 0">Procura por substring do nome em todos os clusters registrados.</p></div>` +
+      `<div id="gsv-results"></div></div>`;
+    const run = async () => {
+      const term = $('#gsv-input').value.trim();
+      searchGlobalQuery = term;
+      const box = $('#gsv-results');
+      if (!term) { box.innerHTML = ''; return; }
+      box.innerHTML = '<div class="empty-state" style="height:120px"><div class="spinner"></div></div>';
+      let data;
+      try {
+        data = await api(`/multicluster/search?q=${encodeURIComponent(term)}`);
+      } catch (e) {
+        box.innerHTML = `<p style="color:var(--color-danger)">${esc(e.message)}</p>`;
+        return;
+      }
+      if (state.view !== 'search') return;
+      const res = data.results || [];
+      let html = `<div class="dash-card"><h3 style="margin:0 0 var(--space-2)">${data.total} resultado(s)${data.truncated ? ` (mostrando ${res.length})` : ''}</h3>`;
+      if (!res.length) {
+        html += '<p style="color:var(--text-tertiary)">Nada encontrado.</p>';
+      } else {
+        const rows = res.map((r) =>
+          `<tr data-cid="${r.cluster_id}" data-kind="${esc(r.kind)}" data-name="${esc(r.name)}" data-ns="${esc(r.namespace || '')}" style="cursor:pointer">` +
+          `<td><span class="badge">${esc(r.cluster_name)}</span></td><td>${esc(r.kind)}</td>` +
+          `<td>${r.namespace ? `<span class="badge">${esc(r.namespace)}</span> ` : ''}<b>${esc(r.name)}</b></td></tr>`
+        ).join('');
+        html += `<table class="data-table"><thead><tr><th>Cluster</th><th>Tipo</th><th>Recurso</th></tr></thead><tbody>${rows}</tbody></table>`;
+      }
+      html += '</div>';
+      if ((data.errors || []).length) {
+        html += `<div class="dash-card" style="margin-top:var(--space-4)"><h3 style="margin:0 0 var(--space-2)">` +
+          `<i class="fas fa-triangle-exclamation"></i> Clusters inacessíveis</h3>` +
+          data.errors.map((e) => `<div style="color:var(--text-secondary)"><span class="badge warning">${esc(e.cluster_name)}</span> ${esc(e.message)}</div>`).join('') +
+          `</div>`;
+      }
+      box.innerHTML = html;
+      box.querySelectorAll('tr[data-cid]').forEach((tr) =>
+        tr.addEventListener('click', () => {
+          state.currentId = +tr.dataset.cid;
+          const cur = current();
+          renderClusters();
+          if (cur) openDetail(cur, tr.dataset.kind, tr.dataset.name, tr.dataset.ns || '', null, null);
+        }));
+    };
+    $('#gsv-run').addEventListener('click', run);
+    $('#gsv-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
+    if (searchGlobalQuery) run();
   }
 
   // Métricas de uso (CPU/Memória) via metrics-server.
@@ -4760,6 +5134,10 @@ spec:
     $('#nav-issues').addEventListener('click', () => goView('issues'));
     $('#nav-budget').addEventListener('click', () => goView('budget'));
     $('#nav-map').addEventListener('click', () => goView('map'));
+    $('#nav-security').addEventListener('click', () => goView('security'));
+    $('#nav-rbac').addEventListener('click', () => goView('rbac'));
+    $('#nav-capacity').addEventListener('click', () => goView('capacity'));
+    $('#nav-search').addEventListener('click', () => goView('search'));
     $('#btn-refresh').addEventListener('click', refreshCluster);
     document.querySelectorAll('[data-close]').forEach((b) =>
       b.addEventListener('click', () => b.closest('.modal-backdrop').classList.remove('open'))

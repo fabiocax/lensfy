@@ -2,15 +2,19 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     ai,
+    capacity,
     clusters,
+    crds,
     deployments,
     helm,
     logs,
     metrics,
+    multicluster,
     onboarding,
     pods,
     portforward,
     resources,
+    security,
 )
 
 api_router = APIRouter()
@@ -26,6 +30,12 @@ api_router.include_router(
     portforward.router, prefix="/portforward", tags=["portforward"]
 )
 api_router.include_router(helm.router, prefix="/helm", tags=["helm"])
+api_router.include_router(security.router, prefix="/security", tags=["security"])
+api_router.include_router(crds.router, prefix="/crds", tags=["crds"])
+api_router.include_router(capacity.router, prefix="/capacity", tags=["capacity"])
+api_router.include_router(
+    multicluster.router, prefix="/multicluster", tags=["multicluster"]
+)
 api_router.include_router(ai.router, prefix="/ai", tags=["ai"])
 api_router.include_router(
     onboarding.router, prefix="/onboarding", tags=["onboarding"]

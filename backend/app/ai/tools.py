@@ -117,6 +117,53 @@ TOOLS: list[dict] = [
             "required": ["name", "namespace"],
         },
     },
+    {
+        "name": "security_scan",
+        "description": "Varredura de postura de segurança dos pods (privileged, hostNetwork/hostPID, hostPath, runAsRoot, capabilities perigosas, sem limits, imagem com tag mutável). Retorna achados por severidade e um score 0-100. Use para auditar segurança.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"namespace": {"type": "string", "description": "opcional; omita para todo o cluster"}},
+        },
+    },
+    {
+        "name": "rbac_can_i",
+        "description": "Verifica de forma autoritativa (SubjectAccessReview) se um sujeito pode executar uma ação. Sem sujeito, checa a credencial atual (como 'kubectl auth can-i'). Use para auditar permissões RBAC.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "verb": {"type": "string", "description": "get, list, create, delete, * …"},
+                "resource": {"type": "string", "description": "pods, deployments, secrets …"},
+                "namespace": {"type": "string"},
+                "group": {"type": "string", "description": "apiGroup (ex.: apps); vazio para core"},
+                "serviceaccount": {"type": "string", "description": "nome ou system:serviceaccount:<ns>:<sa>"},
+                "user": {"type": "string"},
+            },
+            "required": ["verb", "resource"],
+        },
+    },
+    {
+        "name": "rbac_subjects",
+        "description": "Lista todos os sujeitos RBAC (User/Group/ServiceAccount) e os verbos/recursos concedidos pelos roles vinculados, sinalizando cluster-admins. Use para revisar quem pode o quê.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "capacity",
+        "description": "Capacidade por nó: alocável vs solicitado (requests) vs uso real (metrics-server) de CPU/memória e pods — folga de agendamento do cluster. Use para planejamento de capacidade.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "rightsizing",
+        "description": "Recomendações de rightsizing: compara requests/limits ao uso real (metrics-server) e aponta containers super/subdimensionados e risco de OOM. Use para otimizar recursos.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"namespace": {"type": "string", "description": "opcional"}},
+        },
+    },
+    {
+        "name": "list_crds",
+        "description": "Lista as CustomResourceDefinitions instaladas (ArgoCD, cert-manager, Istio, …) com grupo, kind, escopo e versões.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
     # --- mutating ---
     {
         "name": "cordon_node",
@@ -270,6 +317,19 @@ def tool_summary(name: str, inp: dict) -> str:
         return f"Métricas de {inp.get('kind')}"
     if name == "cluster_overview":
         return "Visão geral do cluster"
+    if name == "security_scan":
+        return "Varredura de segurança" + (f" em {ns}" if ns else " do cluster")
+    if name == "rbac_can_i":
+        subj = inp.get("serviceaccount") or inp.get("user") or "credencial atual"
+        return f"Pode '{subj}' {inp.get('verb')} {inp.get('resource')}{loc}?"
+    if name == "rbac_subjects":
+        return "Auditar sujeitos RBAC (quem pode o quê)"
+    if name == "capacity":
+        return "Capacidade dos nós (alocável vs requests vs uso)"
+    if name == "rightsizing":
+        return "Recomendações de rightsizing" + (f" em {ns}" if ns else "")
+    if name == "list_crds":
+        return "Listar CRDs instalados"
     return name
 
 
@@ -313,6 +373,22 @@ def execute_tool(client: KubernetesClient, name: str, inp: dict) -> str:
         return _clip(client.cluster_issues())
     if name == "rollout_history":
         return _clip({"revisions": client.rollout_history("deployments", inp["name"], inp["namespace"])})
+    if name == "security_scan":
+        return _clip(client.security_scan(inp.get("namespace")))
+    if name == "rbac_can_i":
+        return _clip(client.rbac_can_i(
+            verb=inp["verb"], resource=inp["resource"], namespace=inp.get("namespace"),
+            group=inp.get("group", ""), user=inp.get("user"),
+            serviceaccount=inp.get("serviceaccount"),
+        ))
+    if name == "rbac_subjects":
+        return _clip(client.rbac_subjects())
+    if name == "capacity":
+        return _clip(client.capacity())
+    if name == "rightsizing":
+        return _clip(client.rightsizing(inp.get("namespace")))
+    if name == "list_crds":
+        return _clip(client.list_crds())
     # --- mutating ---
     if name == "cordon_node":
         client.cordon_node(inp["name"], bool(inp.get("unschedulable", True)))
