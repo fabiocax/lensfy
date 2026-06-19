@@ -2042,7 +2042,10 @@ class KubernetesClient:
                 if "list" not in verbs:  # só o que dá para listar
                     continue
                 kind = getattr(r, "kind", None)
-                if not kind:
+                if not kind or kind.endswith("List"):
+                    # ``*List`` são os tipos-coleção (ServiceEntryList, …) que a
+                    # descoberta retorna junto do recurso real — não são listáveis
+                    # por kind no dynamic client (dariam 502). Ignora.
                     continue
                 group = getattr(r, "group", "") or ""
                 entry = {

@@ -31,6 +31,8 @@ def test_discover_resources_groups_and_filters():
         _res("ComponentStatus", "componentstatuses", "v1", "", verbs=("get",)),  # sem list
         _res("VirtualService", "virtualservices", "networking.istio.io/v1beta1",
              "networking.istio.io", short=("vs",)),
+        _res("ServiceEntryList", "serviceentries", "networking.istio.io/v1beta1",
+             "networking.istio.io"),                          # tipo-coleção -> ignorado
         _res("Gateway", "gateways", "networking.istio.io/v1", "networking.istio.io", preferred=True),
         _res("Gateway", "gateways", "networking.istio.io/v1alpha3",
              "networking.istio.io", preferred=False),       # versão duplicada -> dedupe
@@ -40,7 +42,10 @@ def test_discover_resources_groups_and_filters():
 
     by_group = {g["group"]: g for g in out["groups"]}
     istio = {r["kind"]: r for r in by_group["networking.istio.io"]["resources"]}
-    assert set(istio) == {"VirtualService", "Gateway"}
+    assert set(istio) == {"VirtualService", "Gateway"}  # ServiceEntryList excluído
+    assert not any(
+        r["kind"].endswith("List") for g in out["groups"] for r in g["resources"]
+    )
     assert istio["Gateway"]["apiVersion"] == "networking.istio.io/v1"  # preferida
     assert istio["VirtualService"]["shortNames"] == ["vs"]
     # core: Pod listável presente; subrecurso e sem-list ausentes
