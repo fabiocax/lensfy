@@ -959,6 +959,7 @@ html, body {
 .logs-prob-empty { color: var(--text-tertiary); padding: var(--space-2); }
 
 /* Aviso de atualização disponível */
+.update-banner[hidden] { display: none; }  /* `display:flex` abaixo venceria o [hidden] do UA */
 .update-banner {
     display: flex;
     align-items: center;
